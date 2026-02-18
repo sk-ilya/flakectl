@@ -20,7 +20,7 @@ def _write_no_failures_outputs(
     repo: str,
     branch: str,
     workflow: str,
-    since: int,
+    lookback_days: int,
 ) -> None:
     """Write summary/report files for a no-failures run."""
     summary = "No failed workflow runs found for the selected filters."
@@ -38,7 +38,7 @@ def _write_no_failures_outputs(
         f.write(f"- Repository: `{repo}`\n")
         f.write(f"- Branch filter: `{branch}`\n")
         f.write(f"- Workflow filter: `{workflow}`\n")
-        f.write(f"- Look-back days: `{since}`\n")
+        f.write(f"- Look-back days: `{lookback_days}`\n")
 
     report_json_path = os.path.join(output_dir, "report.json")
     with open(report_json_path, "w") as f:
@@ -68,7 +68,7 @@ def _write_no_failures_outputs(
 
 def cmd_fetch(args):
     from flakectl.fetch import run
-    return run(args.repo, args.since, args.workflow, args.branch, args.output)
+    return run(args.repo, args.lookback_days, args.workflow, args.branch, args.output)
 
 
 def cmd_progress(args):
@@ -112,14 +112,14 @@ def cmd_run(args):
     csv_path = os.path.join(base, "failed_jobs.csv")
     progress_path = os.path.join(base, "progress.md")
 
-    rc = fetch_run(args.repo, args.since, args.workflow, args.branch, csv_path)
+    rc = fetch_run(args.repo, args.lookback_days, args.workflow, args.branch, csv_path)
     if rc == STATUS_NO_FAILURES:
         _write_no_failures_outputs(
             output_dir=base,
             repo=args.repo,
             branch=args.branch,
             workflow=args.workflow,
-            since=args.since,
+            lookback_days=args.lookback_days,
         )
         return STATUS_NO_FAILURES
     if rc != 0:
@@ -173,7 +173,7 @@ def main():
         help="Target repository (owner/name)",
     )
     p_fetch.add_argument(
-        "--since", type=int, default=7,
+        "--lookback-days", type=int, default=7,
         help="Look-back period in days (default: 7)",
     )
     p_fetch.add_argument(
@@ -265,7 +265,7 @@ def main():
         help="Target repository (owner/name)",
     )
     p_run.add_argument(
-        "--since", type=int, default=7,
+        "--lookback-days", type=int, default=7,
         help="Look-back period in days (default: 7)",
     )
     p_run.add_argument(

@@ -3,37 +3,37 @@ description: 'Analyze CI failures and classify flakes using Claude Agent SDK'
 
 inputs:
   repo:
-    description: 'Repository to analyze (owner/name)'
+    description: 'Repository to analyze, e.g. my-org/my-repo'
     required: true
   branch:
-    description: 'Branch: name, comma-separated list, or * for all'
+    description: 'Only analyze runs from this branch. Single name, comma-separated list, or * for all'
     default: 'main'
-  since:
-    description: 'Look-back period in days (integer)'
+  lookback-days:
+    description: 'How far back to search for failed runs, in days'
     default: '7'
   workflow:
-    description: 'Workflow file: name.yaml, comma-separated list, or * for all'
+    description: 'Workflow file(s) to analyze (from .github/workflows/). Single name, comma-separated list, or * for all'
     required: true
   skip-jobs:
-    description: 'Comma-separated list of job names to skip'
+    description: 'Job names to ignore (comma-separated). Useful for aggregation jobs that do not contain test output'
     default: ''
   context:
-    description: 'Repo-specific context for classifier agents (e.g. test framework details, known patterns)'
+    description: 'Free-text hints for the classifier, e.g. test framework details, known infra quirks, job naming conventions'
     default: ''
   model:
-    description: 'Claude model for classifier agents (e.g. sonnet, opus, haiku)'
+    description: 'Claude model to use: sonnet, opus, or haiku'
     default: 'sonnet'
   stale-timeout:
-    description: 'Minutes with no progress before cancelling remaining agents. Partially classified runs are still included; unfinished runs are marked as errors.'
+    description: 'Safety limit: if no run finishes for this many minutes, cancel remaining work and report what was completed'
     default: '60'
   max-turns:
-    description: 'Maximum turns per classifier agent. Agents that exhaust turns without classifying are retried up to 2 times, then marked as errors.'
+    description: 'Safety limit: max LLM round-trips each classifier agent can make before stopping'
     default: '50'
   anthropic_api_key:
-    description: 'Anthropic API key for Claude Agent SDK'
+    description: 'Anthropic API key (for Claude)'
     required: true
   github_token:
-    description: 'GitHub token with actions:read on the target repo'
+    description: 'GitHub token with actions:read permission on the target repo'
     required: true
 
 outputs:
@@ -69,7 +69,7 @@ runs:
         flakectl run \
           --repo "${{ inputs.repo }}" \
           --branch "${{ inputs.branch }}" \
-          --since "${{ inputs.since }}" \
+          --lookback-days "${{ inputs.lookback-days }}" \
           --workflow "${{ inputs.workflow }}" \
           --skip-jobs "${{ inputs.skip-jobs }}" \
           --context "${{ inputs.context }}" \
