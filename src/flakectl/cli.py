@@ -91,7 +91,7 @@ def _resolve_context(value: str) -> str:
 def cmd_classify(args):
     from flakectl.classify import run
     context = _resolve_context(args.context)
-    return run(args.repo, args.progress, context=context, model=args.model, stale_timeout_min=args.stale_timeout)
+    return run(args.repo, args.progress, context=context, model=args.model, stale_timeout_min=args.stale_timeout, max_turns=args.max_turns)
 
 
 def cmd_extract(args):
@@ -131,7 +131,7 @@ def cmd_run(args):
         return rc
 
     context = _resolve_context(args.context)
-    rc = classify_run(args.repo, progress_path, workdir=base, context=context, model=args.model, stale_timeout_min=args.stale_timeout)
+    rc = classify_run(args.repo, progress_path, workdir=base, context=context, model=args.model, stale_timeout_min=args.stale_timeout, max_turns=args.max_turns)
     if rc != 0:
         return rc
 
@@ -229,8 +229,12 @@ def main():
         help="Claude model for classifier agents (default: sonnet)",
     )
     p_classify.add_argument(
-        "--stale-timeout", type=int, default=30,
-        help="Minutes with no progress before giving up (default: 30)",
+        "--stale-timeout", type=int, default=60,
+        help="Minutes with no progress before giving up (default: 60)",
+    )
+    p_classify.add_argument(
+        "--max-turns", type=int, default=50,
+        help="Maximum turns per classifier agent (default: 50)",
     )
     p_classify.set_defaults(func=cmd_classify)
 
@@ -289,8 +293,12 @@ def main():
         help="Claude model for classifier agents (default: sonnet)",
     )
     p_run.add_argument(
-        "--stale-timeout", type=int, default=30,
-        help="Minutes with no progress before giving up (default: 30)",
+        "--stale-timeout", type=int, default=60,
+        help="Minutes with no progress before giving up (default: 60)",
+    )
+    p_run.add_argument(
+        "--max-turns", type=int, default=50,
+        help="Maximum turns per classifier agent (default: 50)",
     )
     p_run.set_defaults(func=cmd_run)
 
