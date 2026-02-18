@@ -1,4 +1,4 @@
-# flakectl
+# Flake Control
 
 **Stop guessing which CI failures are real.** flakectl analyzes your GitHub Actions history, reads the logs, and tells you exactly which failures are flaky tests, which are infrastructure hiccups, and which are actual bugs -- so your team can stop re-running pipelines and start fixing root causes.
 
