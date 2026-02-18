@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+
+# Local IDE / agent metadata
+.idea/
+.claude/
+
+# flakectl run artifacts
+failed_jobs.csv
+progress.md
+report.md
+report.json
+summary.txt
+*.log
+runs/

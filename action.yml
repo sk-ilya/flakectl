@@ -1,0 +1,97 @@
+name: 'Flaky Test Analysis'
+description: 'Analyze CI failures and classify flakes using Claude Agent SDK'
+
+inputs:
+  repo:
+    description: 'Repository to analyze (owner/name)'
+    required: true
+  branch:
+    description: 'Branch: name, comma-separated list, or * for all'
+    default: 'main'
+  since:
+    description: 'Look-back period in days (integer)'
+    default: '7'
+  workflow:
+    description: 'Workflow file: name.yaml, comma-separated list, or * for all'
+    required: true
+  skip-jobs:
+    description: 'Comma-separated list of job names to skip'
+    default: ''
+  context:
+    description: 'Repo-specific context for classifier agents (e.g. test framework details, known patterns)'
+    default: ''
+  model:
+    description: 'Claude model for classifier agents (e.g. sonnet, opus, haiku)'
+    default: 'sonnet'
+  anthropic_api_key:
+    description: 'Anthropic API key for Claude Agent SDK'
+    required: true
+  github_token:
+    description: 'GitHub token with actions:read on the target repo'
+    required: true
+
+outputs:
+  report:
+    description: 'Path to report.md'
+    value: ${{ steps.analyze.outputs.report }}
+  results:
+    description: 'Path to report.json'
+    value: ${{ steps.analyze.outputs.results }}
+  status:
+    description: 'Run status (ok or no-failures)'
+    value: ${{ steps.analyze.outputs.status }}
+  summary:
+    description: 'Short text summary'
+    value: ${{ steps.analyze.outputs.summary }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install flakectl
+      shell: bash
+      run: pip install ${{ github.action_path }}
+
+    - name: Run analysis
+      id: analyze
+      shell: bash
+      run: |
+        set +e
+        flakectl run \
+          --repo "${{ inputs.repo }}" \
+          --branch "${{ inputs.branch }}" \
+          --since "${{ inputs.since }}" \
+          --workflow "${{ inputs.workflow }}" \
+          --skip-jobs "${{ inputs.skip-jobs }}" \
+          --context "${{ inputs.context }}" \
+          --model "${{ inputs.model }}"
+        RC=$?
+        set -e
+        if [[ "$RC" -ne 0 && "$RC" -ne 20 ]]; then
+          exit "$RC"
+        fi
+        if [[ "$RC" -eq 20 ]]; then
+          echo "status=no-failures" >> "$GITHUB_OUTPUT"
+        else
+          echo "status=ok" >> "$GITHUB_OUTPUT"
+        fi
+        echo "report=$PWD/report.md" >> $GITHUB_OUTPUT
+        echo "results=$PWD/report.json" >> $GITHUB_OUTPUT
+        SUMMARY=$(cat summary.txt 2>/dev/null || echo "Analysis completed. See report.md for details.")
+        {
+          echo "summary<<EOF"
+          echo "$SUMMARY"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+        echo "## Flaky Test Report" >> $GITHUB_STEP_SUMMARY
+        if [[ -f report.md ]]; then
+          cat report.md >> $GITHUB_STEP_SUMMARY
+        else
+          echo "No report generated." >> $GITHUB_STEP_SUMMARY
+        fi
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        GH_TOKEN: ${{ inputs.github_token }}
