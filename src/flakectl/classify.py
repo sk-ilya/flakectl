@@ -156,9 +156,12 @@ Re-read progress.md now and check all categories across all completed runs.
 If any existing category describes the same root cause as yours (same
 structural error pattern, same failure mechanism), update your per-run file
 to use that category instead. Pick the one used by the most runs; break
-ties by earliest run_started_at.
+ties by earliest run_started_at. Do NOT edit progress.md directly.
 
 Then set your run status to "done" (replace "classified" with "done").
+
+Hint: a single full read of progress.md should give you everything you
+need -- avoid multiple greps or partial reads.
 """
 
 
