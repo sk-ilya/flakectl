@@ -120,14 +120,14 @@ def validate_workflows(workflows: list[str] | None) -> None:
 
 def run(
     repo: str,
-    since: int = 7,
+    lookback_days: int = 7,
     workflow: str = "*",
     branch: str = "main",
     output: str = "failed_jobs.csv",
 ) -> int:
     """Fetch failed CI jobs and write to CSV. Returns status code."""
     since_date = (
-        datetime.now(timezone.utc) - timedelta(days=since)
+        datetime.now(timezone.utc) - timedelta(days=lookback_days)
     ).strftime("%Y-%m-%d")
 
     workflows = parse_list_arg(workflow)
@@ -140,7 +140,7 @@ def run(
 
     logger.info(
         "Fetching failed runs from %s since %s (last %d days)...",
-        repo, since_date, since,
+        repo, since_date, lookback_days,
     )
 
     try:
