@@ -23,6 +23,12 @@ inputs:
   model:
     description: 'Claude model for classifier agents (e.g. sonnet, opus, haiku)'
     default: 'sonnet'
+  stale-timeout:
+    description: 'Minutes with no progress before cancelling remaining agents. Partially classified runs are still included; unfinished runs are marked as errors.'
+    default: '60'
+  max-turns:
+    description: 'Maximum turns per classifier agent. Agents that exhaust turns without classifying are retried up to 2 times, then marked as errors.'
+    default: '50'
   anthropic_api_key:
     description: 'Anthropic API key for Claude Agent SDK'
     required: true
@@ -67,7 +73,9 @@ runs:
           --workflow "${{ inputs.workflow }}" \
           --skip-jobs "${{ inputs.skip-jobs }}" \
           --context "${{ inputs.context }}" \
-          --model "${{ inputs.model }}"
+          --model "${{ inputs.model }}" \
+          --stale-timeout "${{ inputs.stale-timeout }}" \
+          --max-turns "${{ inputs.max-turns }}"
         RC=$?
         set -e
         if [[ "$RC" -ne 0 && "$RC" -ne 20 ]]; then

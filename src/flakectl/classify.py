@@ -182,6 +182,7 @@ async def _run_and_merge(
     merge_lock: asyncio.Lock,
     context: str = "",
     model: str = "sonnet",
+    max_turns: int = 50,
 ) -> None:
     """Classify a run, merge results, recheck categories, then final-merge.
 
@@ -189,7 +190,6 @@ async def _run_and_merge(
     recheck. The merge between phases ensures the recheck reads up-to-date
     categories from progress.md.
     """
-    max_turns = 30
     system_prompt = _build_system_prompt(context=context)
     task = (
         f"Classify run {run_id}. REPO={repo}. "
@@ -303,7 +303,8 @@ async def _classify_all(
     context: str = "",
     model: str = "sonnet",
     max_retries: int = 2,
-    stale_timeout_min: int = 30,
+    stale_timeout_min: int = 60,
+    max_turns: int = 50,
 ) -> tuple[set[str], set[str]]:
     """Launch classifier agents and poll until all finish or retries exhausted.
 
@@ -322,7 +323,8 @@ async def _classify_all(
         rid: asyncio.create_task(
             _run_and_merge(rid, repo, run_files[rid], cwd,
                            progress_path, merged, merge_lock,
-                           context=context, model=model))
+                           context=context, model=model,
+                           max_turns=max_turns))
         for rid in run_ids
     }
     logger.info("Launched %d classifier agents", len(tasks))
@@ -365,7 +367,8 @@ async def _classify_all(
                 tasks[rid] = asyncio.create_task(
                     _run_and_merge(rid, repo, run_files[rid], cwd,
                                    progress_path, merged, merge_lock,
-                                   context=context, model=model))
+                                   context=context, model=model,
+                                   max_turns=max_turns))
 
         # All remaining agents exited and retries exhausted
         if all(tasks[rid].done() for rid in remaining):
@@ -450,7 +453,7 @@ async def _classify_all(
     return done, unfinished
 
 
-async def run_orchestrator(repo: str, progress: str, workdir: str | None = None, context: str = "", model: str = "sonnet", stale_timeout_min: int = 30):
+async def run_orchestrator(repo: str, progress: str, workdir: str | None = None, context: str = "", model: str = "sonnet", stale_timeout_min: int = 60, max_turns: int = 50):
     pending = get_pending_runs(progress)
     if not pending:
         logger.info("No pending runs found")
@@ -476,7 +479,8 @@ async def run_orchestrator(repo: str, progress: str, workdir: str | None = None,
     # Orchestrator incrementally merges completed runs back into progress.md
     done, unfinished = await _classify_all(
         run_ids, repo, progress, run_files, cwd, context=context,
-        model=model, stale_timeout_min=stale_timeout_min)
+        model=model, stale_timeout_min=stale_timeout_min,
+        max_turns=max_turns)
     unfinished |= set(missing)
 
     logger.info("Classification complete: %d done, %d unfinished %s",
@@ -547,9 +551,9 @@ def run_summarize(report_md: str, progress: str = "progress.md", workdir: str | 
     asyncio.run(_run_summarize(report_md, progress, cwd, model=model))
 
 
-def run(repo: str, progress: str = "progress.md", workdir: str | None = None, context: str = "", model: str = "sonnet", stale_timeout_min: int = 30) -> int:
+def run(repo: str, progress: str = "progress.md", workdir: str | None = None, context: str = "", model: str = "sonnet", stale_timeout_min: int = 60, max_turns: int = 50) -> int:
     """Run the classification orchestrator. Returns 0 on success, 1 if no runs completed."""
-    asyncio.run(run_orchestrator(repo, progress, workdir, context=context, model=model, stale_timeout_min=stale_timeout_min))
+    asyncio.run(run_orchestrator(repo, progress, workdir, context=context, model=model, stale_timeout_min=stale_timeout_min, max_turns=max_turns))
     done = get_done_runs(progress)
     if not done:
         return 1
