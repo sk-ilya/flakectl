@@ -26,7 +26,6 @@ The simplest way to use flakectl is as a GitHub Action in a scheduled or manuall
     lookback-days: '7'
     workflow: 'ci.yaml'
     anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-    github_token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ### Inputs
@@ -43,7 +42,7 @@ The simplest way to use flakectl is as a GitHub Action in a scheduled or manuall
 | `stale-timeout` | no | `60` | Safety limit: if no run finishes for this many minutes, cancel remaining work and report what was completed so far |
 | `max-turns` | no | `50` | Safety limit: maximum number of LLM round-trips each classifier agent can make before stopping |
 | `anthropic_api_key` | yes | | Anthropic API key (for Claude) |
-| `github_token` | yes | | GitHub token with `actions:read` permission on the target repo |
+| `github_token` | no | `${{ github.token }}` | GitHub token with `actions:read` permission on the target repo. Override with a PAT for cross-repo analysis |
 
 ### Outputs
 
@@ -80,7 +79,6 @@ jobs:
             This repo uses Ginkgo with numeric test labels (e.g. [78753]).
             The e2e-test jobs run on ephemeral VMs.
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Notify Slack
         if: success()

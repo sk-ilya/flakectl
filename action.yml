@@ -34,7 +34,7 @@ inputs:
     required: true
   github_token:
     description: 'GitHub token with actions:read permission on the target repo'
-    required: true
+    default: ${{ github.token }}
 
 outputs:
   report:
