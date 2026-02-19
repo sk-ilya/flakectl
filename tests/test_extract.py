@@ -9,6 +9,8 @@ from conftest import make_progress_content
 from flakectl.extract import (
     _build_category_data,
     _determine_flake_status,
+    _lookup_description,
+    _split_category,
     _summarize_runs,
     parse_categories_section,
     parse_field,
@@ -128,7 +130,7 @@ class TestParseJobs:
             "- **job_id**: 100\n"
             "- **category**: test-flake/timeout\n"
             "- **is_flake**: yes\n"
-            "- **test_id**: TestFoo\n"
+            "- **test-id**: TestFoo\n"
             "- **failed_test**: test_foo.py\n"
             "- **error_message**: timeout\n"
             "- **summary**: timed out\n"
@@ -147,7 +149,7 @@ class TestParseJobs:
             "- **job_id**: 1\n"
             "- **category**: bug/crash\n"
             "- **is_flake**: no\n"
-            "- **test_id**: T1\n"
+            "- **test-id**: T1\n"
             "- **failed_test**: t1.py\n"
             "- **error_message**: crash\n"
             "- **summary**: crashed\n\n"
@@ -156,7 +158,7 @@ class TestParseJobs:
             "- **job_id**: 2\n"
             "- **category**: test-flake/race\n"
             "- **is_flake**: yes\n"
-            "- **test_id**: T2\n"
+            "- **test-id**: T2\n"
             "- **failed_test**: t2.py\n"
             "- **error_message**: race\n"
             "- **summary**: race condition\n"
@@ -177,7 +179,7 @@ class TestParseJobs:
             "- **job_id**:\n"
             "- **category**:\n"
             "- **is_flake**:\n"
-            "- **test_id**:\n"
+            "- **test-id**:\n"
             "- **failed_test**:\n"
             "- **error_message**:\n"
             "- **summary**:\n"
@@ -194,7 +196,7 @@ class TestParseJobs:
             "- **job_id**: 42\n"
             "- **category**: bug/crash\n"
             "- **is_flake**: no\n"
-            "- **test_id**:\n"
+            "- **test-id**:\n"
             "- **failed_test**:\n"
             "- **error_message**:\n"
             "- **summary**:\n"
@@ -508,3 +510,232 @@ class TestRunIntegration:
 
         rc = run(str(progress), str(tmp_path / "r.md"), str(tmp_path / "r.json"))
         assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# _split_category
+# ---------------------------------------------------------------------------
+
+class TestSplitCategory:
+    def test_two_segments(self):
+        assert _split_category("infra-flake/registry-502") == (
+            "infra-flake/registry-502", "")
+
+    def test_three_segments(self):
+        assert _split_category("test-flake/timeout/78753") == (
+            "test-flake/timeout", "78753")
+
+    def test_four_segments(self):
+        assert _split_category("test-flake/timeout/sub/extra") == (
+            "test-flake/timeout/sub", "extra")
+
+    def test_single_segment(self):
+        assert _split_category("standalone") == ("standalone", "")
+
+    def test_empty_string(self):
+        assert _split_category("") == ("", "")
+
+
+# ---------------------------------------------------------------------------
+# _lookup_description
+# ---------------------------------------------------------------------------
+
+class TestLookupDescription:
+    def test_exact_match(self):
+        descs = {"test-flake/timeout": "Timeout flake"}
+        assert _lookup_description("test-flake/timeout", descs) == "Timeout flake"
+
+    def test_match_via_split(self):
+        descs = {"test-flake/timeout/78753": "Timeout in test 78753"}
+        assert _lookup_description("test-flake/timeout", descs) == (
+            "Timeout in test 78753")
+
+    def test_no_match(self):
+        descs = {"test-flake/other": "Something else"}
+        assert _lookup_description("test-flake/timeout", descs) == ""
+
+    def test_empty_descriptions(self):
+        assert _lookup_description("test-flake/timeout", {}) == ""
+
+
+# ---------------------------------------------------------------------------
+# Subcategory grouping
+# ---------------------------------------------------------------------------
+
+class TestSubcategoryGrouping:
+    def _make_row(self, run_id="1", category="test-flake/timeout",
+                  is_flake="yes", test_id="TestA",
+                  run_started_at="2025-01-15T10:00:00Z",
+                  run_url="https://example.com/1", branch="main",
+                  error_message="", summary=""):
+        return {
+            "run_id": run_id,
+            "category": category,
+            "is_flake": is_flake,
+            "test_id": test_id,
+            "run_started_at": run_started_at,
+            "run_url": run_url,
+            "branch": branch,
+            "error_message": error_message,
+            "summary": summary,
+        }
+
+    def test_same_category_different_subcategories_grouped(self):
+        rows = [
+            self._make_row(run_id="1", category="test-flake/timeout/TestA",
+                           test_id="TestA"),
+            self._make_row(run_id="2", category="test-flake/timeout/TestB",
+                           test_id="TestB"),
+        ]
+        result = _build_category_data(
+            [("test-flake/timeout", rows)], {}, date(2025, 1, 15)
+        )
+        assert len(result) == 1
+        assert result[0]["name"] == "test-flake/timeout"
+        assert result[0]["subcategories"] == ["TestA", "TestB"]
+        assert result[0]["run_count"] == 2
+
+    def test_two_segment_category_has_empty_subcategories(self):
+        rows = [self._make_row(category="infra-flake/registry-502")]
+        result = _build_category_data(
+            [("infra-flake/registry-502", rows)], {}, date(2025, 1, 15)
+        )
+        assert result[0]["subcategories"] == []
+
+    def test_subcategories_deduplicated(self):
+        rows = [
+            self._make_row(run_id="1", category="test-flake/timeout/TestA"),
+            self._make_row(run_id="2", category="test-flake/timeout/TestA"),
+        ]
+        result = _build_category_data(
+            [("test-flake/timeout", rows)], {}, date(2025, 1, 15)
+        )
+        assert result[0]["subcategories"] == ["TestA"]
+
+    def test_subcategory_column_in_markdown(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout/TestA",
+                    "is_flake": "yes",
+                    "test_id": "TestA",
+                }],
+            },
+            {
+                "run_id": "200",
+                "status": "done",
+                "run_started_at": "2025-01-15T11:00:00Z",
+                "jobs": [{
+                    "name": "j2",
+                    "category": "test-flake/timeout/TestB",
+                    "is_flake": "yes",
+                    "test_id": "TestB",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+
+        md = tmp_path / "report.md"
+        js = tmp_path / "report.json"
+        run(str(progress), str(md), str(js))
+
+        md_text = md.read_text()
+        assert "| Subcategory |" in md_text
+        assert "test-flake/timeout" in md_text
+        # Both subcategories merged into one row
+        assert "TestA, TestB" in md_text
+
+    def test_subcategories_in_json(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout/TestA",
+                    "is_flake": "yes",
+                    "test_id": "TestA",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+
+        js = tmp_path / "report.json"
+        run(str(progress), str(tmp_path / "report.md"), str(js))
+
+        data = json.loads(js.read_text())
+        assert len(data["categories"]) == 1
+        assert data["categories"][0]["name"] == "test-flake/timeout"
+        assert data["categories"][0]["subcategories"] == ["TestA"]
+
+    def test_grouping_collapses_shared_category(self, tmp_path):
+        """Two different full categories with same first two segments -> one row."""
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout/TestA",
+                    "is_flake": "yes",
+                    "test_id": "TestA",
+                    "error_message": "timeout",
+                    "summary": "timed out",
+                }],
+            },
+            {
+                "run_id": "200",
+                "status": "done",
+                "run_started_at": "2025-01-15T11:00:00Z",
+                "jobs": [{
+                    "name": "j2",
+                    "category": "test-flake/timeout/TestB",
+                    "is_flake": "yes",
+                    "test_id": "TestB",
+                    "error_message": "timeout",
+                    "summary": "timed out",
+                }],
+            },
+            {
+                "run_id": "300",
+                "status": "done",
+                "run_started_at": "2025-01-15T12:00:00Z",
+                "jobs": [{
+                    "name": "j3",
+                    "category": "infra-flake/registry-502",
+                    "is_flake": "yes",
+                    "test_id": "",
+                    "error_message": "502",
+                    "summary": "registry down",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+
+        js = tmp_path / "report.json"
+        run(str(progress), str(tmp_path / "report.md"), str(js))
+
+        data = json.loads(js.read_text())
+        assert len(data["categories"]) == 2
+        names = [c["name"] for c in data["categories"]]
+        assert "test-flake/timeout" in names
+        assert "infra-flake/registry-502" in names
+
+        timeout_cat = next(c for c in data["categories"]
+                          if c["name"] == "test-flake/timeout")
+        assert timeout_cat["runs"] == 2
+        assert timeout_cat["jobs"] == 2
+        assert timeout_cat["subcategories"] == ["TestA", "TestB"]
+
+        infra_cat = next(c for c in data["categories"]
+                        if c["name"] == "infra-flake/registry-502")
+        assert infra_cat["subcategories"] == []

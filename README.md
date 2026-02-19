@@ -5,8 +5,8 @@
 ```
 18 failed runs analyzed: 18 caused by flakes, 0 caused by real failures.
 
- 1. test-flake/78753-hooks-lifecycle-timeout        runs=9   jobs=19  flake=yes
- 2. test-flake/78684-fleet-update-not-scheduled      runs=2   jobs=3   flake=yes
+ 1. test-flake/hooks-lifecycle-timeout               runs=9   jobs=19  flake=yes
+ 2. test-flake/fleet-update-not-scheduled            runs=2   jobs=3   flake=yes
  3. infra-flake/registry-502-blob-fetch              runs=1   jobs=1   flake=yes
     ...
 ```
@@ -121,20 +121,20 @@ GitHub Actions API           Claude Agent SDK                 Report
 
 **18 failed runs** analyzed: **18 caused by flakes**, **0 caused by real failures**.
 
-| #   | Category                                       | Runs/Jobs | Flake? | Last Occurred |
-| --- | ---------------------------------------------- | --------- | ------ | ------------- |
-| 1   | `test-flake/78753-hooks-lifecycle-timeout`     | 9/19      | yes    | today         |
-| 2   | `test-flake/78684-fleet-update-not-scheduled`  | 2/3       | yes    | 6 days ago    |
+| #   | Category                                    | Subcategory  | Runs/Jobs | Flake? | Last Occurred |
+| --- | ------------------------------------------- | ------------ | --------- | ------ | ------------- |
+| 1   | `test-flake/hooks-lifecycle-timeout`        | 78753, 78684 | 9/19      | yes    | today         |
+| 2   | `infra-flake/registry-502-blob-fetch`       |              | 1/1       | yes    | 6 days ago    |
 
 ## Root Causes (Detail)
 
-### 1. `test-flake/78753-hooks-lifecycle-timeout`
+### 1. `test-flake/hooks-lifecycle-timeout`
 
 **Description:** Device lifecycle hooks test timeout waiting for renderedVersion update
 
 - **Failed runs:** 9
 - **Failed jobs:** 19
-- **Test IDs:** 78753
+- **Test IDs:** 78684, 78753
 - **Example error:** `Device failed to update to renderedVersion 8 (current=7)`
 - **Example summary:** Flake: Test 78753 timed out after 5m29s waiting
   for the device to update. The device got stuck with
@@ -156,11 +156,12 @@ GitHub Actions API           Claude Agent SDK                 Report
   "real_failure_runs": 0,
   "categories": [
     {
-      "name": "test-flake/78753-hooks-lifecycle-timeout",
+      "name": "test-flake/hooks-lifecycle-timeout",
       "is_flake": "yes",
       "runs": 9,
       "jobs": 19,
-      "test_ids": ["78753"],
+      "test_ids": ["78684", "78753"],
+      "subcategories": ["78684", "78753"],
       "affected_runs": [...]
     }
   ]
@@ -169,7 +170,7 @@ GitHub Actions API           Claude Agent SDK                 Report
 
 ### summary.txt (short CI/Slack summary)
 
-> Analyzed 18 CI workflow runs. All 18 were classified as flakes with no genuine bugs found. The dominant root cause is test-flake/78753 (device lifecycle hooks timeout), accounting for 9 runs.
+> Analyzed 18 CI workflow runs. All 18 were classified as flakes with no genuine bugs found. The dominant root cause is test-flake/hooks-lifecycle-timeout (device lifecycle hooks timeout), accounting for 9 runs.
 
 ## Classification categories
 
@@ -177,10 +178,10 @@ Each failure is assigned a root-cause category. One category = one root cause = 
 
 | Type | Flake? | Meaning | Example |
 |------|--------|---------|---------|
-| `test-flake/<id>-<cause>` | yes | Intermittent test failure (timing, races, fragile assertions) | `test-flake/78753-hooks-timeout` |
+| `test-flake/<cause>/<id>` | yes | Intermittent test failure (timing, races, fragile assertions) | `test-flake/hooks-timeout/78753` |
 | `test-flake/systemic-<cause>` | yes | Environment broken, all tests on a VM fail | `test-flake/systemic-device-stuck-v0` |
 | `infra-flake/<cause>` | yes | CI infrastructure issue (network, image pull, registry) | `infra-flake/registry-502-blob-fetch` |
-| `bug/<id>-<cause>` | no | Test correctly caught a real code defect | `bug/TestParseConfig-nil-pointer` |
+| `bug/<cause>/<id>` | no | Test correctly caught a real code defect | `bug/nil-pointer/TestParseConfig` |
 | `build-error/<cause>` | no | Code doesn't compile | `build-error/undefined-symbol` |
 
 The classifier understands Ginkgo, Go testing, pytest, JUnit, Jest, and RSpec test output formats.

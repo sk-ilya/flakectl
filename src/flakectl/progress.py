@@ -75,7 +75,7 @@ def run(
                 out.write("- **job_id**:\n")
                 out.write("- **category**:\n")
                 out.write("- **is_flake**:\n")
-                out.write("- **test_id**:\n")
+                out.write("- **test-id**:\n")
                 out.write("- **failed_test**:\n")
                 out.write("- **error_message**:\n")
                 out.write("- **summary**:\n\n")

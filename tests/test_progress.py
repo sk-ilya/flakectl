@@ -105,7 +105,7 @@ class TestProgressRun:
         assert "- **job_id**:" in text
         assert "- **category**:" in text
         assert "- **is_flake**:" in text
-        assert "- **test_id**:" in text
+        assert "- **test-id**:" in text
 
     def test_skip_jobs_filtering(self, tmp_path):
         csv_content = make_csv_content([

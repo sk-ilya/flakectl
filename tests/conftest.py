@@ -11,7 +11,7 @@ def make_progress_content(runs):
 
     Each job dict should have:
         name, and optionally: step, job_id, category, is_flake,
-        test_id, failed_test, error_message, summary.
+        test-id, failed_test, error_message, summary.
     """
     lines = [
         "# CI Failure Classification Progress\n",
@@ -59,7 +59,7 @@ def make_progress_content(runs):
             lines.append(f"- **job_id**: {job_id}")
             lines.append(f"- **category**: {category}")
             lines.append(f"- **is_flake**: {is_flake}")
-            lines.append(f"- **test_id**: {test_id}")
+            lines.append(f"- **test-id**: {test_id}")
             lines.append(f"- **failed_test**: {failed_test}")
             lines.append(f"- **error_message**: {error_message}")
             lines.append(f"- **summary**: {summary}")
