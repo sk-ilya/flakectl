@@ -1,10 +1,13 @@
-"""Custom MCP tools for the classifier sub-agent.
+"""Custom MCP tools for classifier and correlator sub-agents.
 
 Provides get_jobs and download_log tools so the classifier agent can
 interact with GitHub Actions without shelling out to CLI commands.
+Also provides gh_search for the correlator agent.
 """
 
 import os
+import shlex
+import subprocess
 import sys
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
@@ -197,4 +200,81 @@ def create_github_tools_server():
         name="github",
         version="1.0.0",
         tools=[get_jobs, download_log, get_file, get_commit, list_repo_dir],
+    )
+
+
+def _mcp_error(msg: str) -> dict:
+    """Return an MCP error response."""
+    return {
+        "content": [{"type": "text", "text": msg}],
+        "is_error": True,
+    }
+
+
+def create_correlate_tools_server(repo: str):
+    """Create an MCP server with tools for the correlate agent.
+
+    The repo parameter is baked into gh_search so the agent cannot
+    query arbitrary repositories.
+    """
+    _ALLOWED_SUBJECTS = {"commits", "prs", "issues", "code"}
+
+    @tool(
+        "gh_search",
+        "Search GitHub using the gh CLI. "
+        "Runs: gh search <subject> --repo <REPO> <args>. "
+        "The --repo flag is pre-set -- do NOT include --repo or -R. "
+        "subject: commits, prs, issues, or code. "
+        "args: free-form gh search flags and query terms. "
+        "Use --json for structured output (e.g. --json sha,commit for "
+        "commits; --json number,title,url for PRs). "
+        "RATE LIMIT: ~30 requests/minute. Plan searches upfront, use "
+        "broad queries, prefer test IDs as search terms.",
+        {"subject": str, "args": str},
+    )
+    async def gh_search(params):
+        subject = params["subject"]
+        if subject not in _ALLOWED_SUBJECTS:
+            return _mcp_error(
+                f"Invalid subject '{subject}'. "
+                f"Must be one of: {', '.join(sorted(_ALLOWED_SUBJECTS))}"
+            )
+        try:
+            parsed_args = shlex.split(params["args"])
+        except ValueError as e:
+            return _mcp_error(f"Invalid args: {e}")
+
+        cmd = ["gh", "search", subject, "--repo", repo, *parsed_args]
+        print(
+            f"[correlate] gh search {subject} {params['args'][:120]}",
+            file=sys.stderr, flush=True,
+        )
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30,
+            )
+        except FileNotFoundError:
+            return _mcp_error(
+                "gh CLI not found. Install from https://cli.github.com"
+            )
+        except subprocess.TimeoutExpired:
+            return _mcp_error("Command timed out after 30 seconds")
+
+        if result.returncode != 0:
+            msg = f"Error (exit {result.returncode}): {result.stderr.strip()}"
+            print(f"[correlate] {msg[:200]}", file=sys.stderr, flush=True)
+            return _mcp_error(msg)
+
+        output = result.stdout
+        lines = output.count("\n")
+        print(
+            f"[correlate] Got {lines} result line(s)",
+            file=sys.stderr, flush=True,
+        )
+        return {"content": [{"type": "text", "text": output}]}
+
+    return create_sdk_mcp_server(
+        name="correlate",
+        version="1.0.0",
+        tools=[gh_search, get_commit, get_file],
     )

@@ -21,6 +21,9 @@ progress.md
 report.md
 report.json
 summary.txt
+fixes.json
+candidates_commits.tsv
+candidates_prs.tsv
 *.log
 runs/
 files/

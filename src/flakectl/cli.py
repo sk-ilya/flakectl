@@ -94,18 +94,31 @@ def cmd_classify(args):
     return run(args.repo, args.progress, context=context, model=args.model, stale_timeout_min=args.stale_timeout, max_turns=args.max_turns)
 
 
+def cmd_correlate(args):
+    from flakectl.correlate import run
+    return run(
+        args.repo, args.progress,
+        lookback_days=args.lookback_days,
+        workdir=os.path.dirname(args.progress) or ".",
+        model=args.model, max_turns=args.max_turns,
+    )
+
+
 def cmd_extract(args):
     from flakectl.extract import run
-    return run(args.input, args.output_md, args.output_json)
+    return run(args.input, args.output_md, args.output_json,
+               fixes_path=args.fixes)
 
 
 def cmd_run(args):
-    """Chain all steps: fetch -> progress -> classify -> extract -> summarize."""
+    """Chain all steps: fetch -> progress -> classify -> correlate -> extract -> summarize."""
     from flakectl.fetch import STATUS_NO_FAILURES, run as fetch_run
     from flakectl.progress import run as progress_run
     from flakectl.classify import run as classify_run
+    from flakectl.correlate import run as correlate_run
     from flakectl.extract import run as extract_run
 
+    logger = logging.getLogger(__name__)
     base = args.output_dir
     os.makedirs(base, exist_ok=True)
 
@@ -131,15 +144,26 @@ def cmd_run(args):
         return rc
 
     context = _resolve_context(args.context)
-    rc = classify_run(args.repo, progress_path, workdir=base, context=context, model=args.model, stale_timeout_min=args.stale_timeout, max_turns=args.max_turns)
+    rc = classify_run(args.repo, progress_path, workdir=base, context=context, model=args.model, stale_timeout_min=args.stale_timeout, max_turns=args.max_turns_classify)
     if rc != 0:
         return rc
 
+    # Correlate categories with fix commits/PRs (non-fatal)
+    rc = correlate_run(
+        args.repo, progress_path,
+        lookback_days=args.lookback_days,
+        workdir=base, model=args.model, max_turns=args.max_turns_correlate,
+    )
+    if rc != 0:
+        logger.warning("Correlate step failed (non-fatal), continuing")
+
+    fixes_path = os.path.join(base, "fixes.json")
     report_md = os.path.join(base, "report.md")
     rc = extract_run(
         progress_path,
         report_md,
         os.path.join(base, "report.json"),
+        fixes_path=fixes_path if os.path.exists(fixes_path) else None,
     )
     if rc != 0:
         return rc
@@ -238,6 +262,33 @@ def main():
     )
     p_classify.set_defaults(func=cmd_classify)
 
+    # --- correlate ---
+    p_correlate = subparsers.add_parser(
+        "correlate",
+        help="Correlate classified categories with fix commits/PRs",
+    )
+    p_correlate.add_argument(
+        "--repo", required=True,
+        help="Target repository (owner/name)",
+    )
+    p_correlate.add_argument(
+        "--progress", default="progress.md",
+        help="Path to progress.md (default: progress.md)",
+    )
+    p_correlate.add_argument(
+        "--lookback-days", type=int, default=7,
+        help="Look-back period in days (default: 7)",
+    )
+    p_correlate.add_argument(
+        "--model", default="sonnet",
+        help="Claude model for correlator agent (default: sonnet)",
+    )
+    p_correlate.add_argument(
+        "--max-turns", type=int, default=80,
+        help="Maximum turns per correlator agent (default: 80)",
+    )
+    p_correlate.set_defaults(func=cmd_correlate)
+
     # --- extract ---
     p_extract = subparsers.add_parser(
         "extract", help="Extract results from progress.md into report files",
@@ -254,11 +305,15 @@ def main():
         "--output-json", default="report.json",
         help="Output JSON report path (default: report.json)",
     )
+    p_extract.add_argument(
+        "--fixes", default=None,
+        help="Path to fixes.json from correlate step (optional, auto-detected if in same dir)",
+    )
     p_extract.set_defaults(func=cmd_extract)
 
     # --- run (full pipeline) ---
     p_run = subparsers.add_parser(
-        "run", help="Run the full pipeline: fetch -> progress -> classify -> extract -> summarize",
+        "run", help="Run the full pipeline: fetch -> progress -> classify -> correlate -> extract -> summarize",
     )
     p_run.add_argument(
         "--repo", required=True,
@@ -297,8 +352,12 @@ def main():
         help="Minutes with no progress before giving up (default: 60)",
     )
     p_run.add_argument(
-        "--max-turns", type=int, default=50,
-        help="Maximum turns per classifier agent (default: 50)",
+        "--max-turns-classify", type=int, default=60,
+        help="Maximum turns per classifier agent (default: 60)",
+    )
+    p_run.add_argument(
+        "--max-turns-correlate", type=int, default=80,
+        help="Maximum turns for the correlator agent (default: 80)",
     )
     p_run.set_defaults(func=cmd_run)
 

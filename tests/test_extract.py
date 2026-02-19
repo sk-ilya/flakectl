@@ -9,6 +9,8 @@ from conftest import make_progress_content
 from flakectl.extract import (
     _build_category_data,
     _determine_flake_status,
+    _format_fix_link,
+    _load_fixes,
     _lookup_description,
     _split_category,
     _summarize_runs,
@@ -739,3 +741,260 @@ class TestSubcategoryGrouping:
         infra_cat = next(c for c in data["categories"]
                         if c["name"] == "infra-flake/registry-502")
         assert infra_cat["subcategories"] == []
+
+
+# ---------------------------------------------------------------------------
+# _load_fixes
+# ---------------------------------------------------------------------------
+
+class TestLoadFixes:
+    def test_loads_valid_fixes(self, tmp_path):
+        fixes = {
+            "fixes": [
+                {
+                    "category": "test-flake/timeout",
+                    "items": [
+                        {"type": "pr", "id": 123, "url": "https://example.com/pull/123",
+                         "title": "Fix timeout", "confidence": "match"},
+                    ],
+                },
+            ],
+        }
+        path = tmp_path / "fixes.json"
+        path.write_text(json.dumps(fixes))
+
+        result = _load_fixes(str(path))
+        assert "test-flake/timeout" in result
+        assert len(result["test-flake/timeout"]) == 1
+        assert result["test-flake/timeout"][0]["id"] == 123
+
+    def test_returns_empty_for_missing_file(self):
+        assert _load_fixes("/nonexistent/path.json") == {}
+
+    def test_returns_empty_for_none(self):
+        assert _load_fixes(None) == {}
+
+    def test_returns_empty_for_malformed_json(self, tmp_path):
+        path = tmp_path / "fixes.json"
+        path.write_text("not json")
+        assert _load_fixes(str(path)) == {}
+
+    def test_returns_empty_for_empty_fixes(self, tmp_path):
+        path = tmp_path / "fixes.json"
+        path.write_text('{"fixes": []}')
+        assert _load_fixes(str(path)) == {}
+
+    def test_skips_entries_without_category(self, tmp_path):
+        fixes = {"fixes": [{"items": [{"type": "pr"}]}]}
+        path = tmp_path / "fixes.json"
+        path.write_text(json.dumps(fixes))
+        assert _load_fixes(str(path)) == {}
+
+    def test_skips_entries_without_items(self, tmp_path):
+        fixes = {"fixes": [{"category": "test-flake/timeout"}]}
+        path = tmp_path / "fixes.json"
+        path.write_text(json.dumps(fixes))
+        assert _load_fixes(str(path)) == {}
+
+
+# ---------------------------------------------------------------------------
+# _format_fix_link
+# ---------------------------------------------------------------------------
+
+class TestFormatFixLink:
+    def test_pr_match(self):
+        item = {"type": "pr", "id": 456, "url": "https://example.com/pull/456",
+                "confidence": "match"}
+        assert _format_fix_link(item) == "[#456](https://example.com/pull/456)"
+
+    def test_pr_possible(self):
+        item = {"type": "pr", "id": 789, "url": "https://example.com/pull/789",
+                "confidence": "possible"}
+        assert _format_fix_link(item) == "[#789](https://example.com/pull/789) (possibly)"
+
+    def test_commit_match(self):
+        item = {"type": "commit", "sha": "abc123def456789",
+                "url": "https://example.com/commit/abc123def456789",
+                "confidence": "match"}
+        assert _format_fix_link(item) == "[abc123d](https://example.com/commit/abc123def456789)"
+
+    def test_commit_possible(self):
+        item = {"type": "commit", "sha": "1234567890abcdef",
+                "url": "https://example.com/commit/1234567890abcdef",
+                "confidence": "possible"}
+        assert _format_fix_link(item) == "[1234567](https://example.com/commit/1234567890abcdef) (possibly)"
+
+
+# ---------------------------------------------------------------------------
+# run() with fixes
+# ---------------------------------------------------------------------------
+
+class TestRunWithFixes:
+    def _make_fixes_json(self, tmp_path):
+        fixes = {
+            "fixes": [
+                {
+                    "category": "test-flake/timeout",
+                    "items": [
+                        {"type": "pr", "id": 42, "url": "https://example.com/pull/42",
+                         "title": "Fix timeout", "confidence": "match"},
+                        {"type": "commit", "sha": "deadbeef12345678",
+                         "url": "https://example.com/commit/deadbeef12345678",
+                         "title": "Increase timeout", "confidence": "possible"},
+                    ],
+                },
+            ],
+        }
+        path = tmp_path / "fixes.json"
+        path.write_text(json.dumps(fixes))
+        return str(path)
+
+    def test_fix_column_in_summary_table(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout",
+                    "is_flake": "yes",
+                    "test_id": "TestSlow",
+                    "error_message": "timeout",
+                    "summary": "timed out",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+        fixes_path = self._make_fixes_json(tmp_path)
+
+        md = tmp_path / "report.md"
+        run(str(progress), str(md), str(tmp_path / "report.json"),
+            fixes_path=fixes_path)
+
+        md_text = md.read_text()
+        # Summary table has Fix column with only confident matches
+        assert "| Fix |" in md_text
+        # Extract the summary table (between "## Summary" and "## Root Causes")
+        summary_section = md_text.split("## Summary")[1].split("## Root Causes")[0]
+        assert "[#42]" in summary_section
+        assert "[deadbee]" not in summary_section
+        assert "(possibly)" not in summary_section
+
+    def test_fix_field_in_detail_section(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout",
+                    "is_flake": "yes",
+                    "test_id": "TestSlow",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+        fixes_path = self._make_fixes_json(tmp_path)
+
+        md = tmp_path / "report.md"
+        run(str(progress), str(md), str(tmp_path / "report.json"),
+            fixes_path=fixes_path)
+
+        md_text = md.read_text()
+        # Detail section shows all fixes including possible ones
+        assert "- **Fix:**" in md_text
+        detail_section = md_text.split("## Root Causes")[1]
+        assert "[#42]" in detail_section
+        assert "[deadbee]" in detail_section
+        assert "(possibly)" in detail_section
+
+    def test_fixes_in_json_output(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout",
+                    "is_flake": "yes",
+                    "test_id": "TestSlow",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+        fixes_path = self._make_fixes_json(tmp_path)
+
+        js = tmp_path / "report.json"
+        run(str(progress), str(tmp_path / "report.md"), str(js),
+            fixes_path=fixes_path)
+
+        data = json.loads(js.read_text())
+        cat = data["categories"][0]
+        assert "fixes" in cat
+        assert len(cat["fixes"]) == 2
+        assert cat["fixes"][0]["type"] == "pr"
+        assert cat["fixes"][0]["id"] == 42
+        assert cat["fixes"][1]["type"] == "commit"
+        assert cat["fixes"][1]["confidence"] == "possible"
+
+    def test_no_fixes_file_still_works(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout",
+                    "is_flake": "yes",
+                    "test_id": "TestSlow",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+
+        md = tmp_path / "report.md"
+        js = tmp_path / "report.json"
+        rc = run(str(progress), str(md), str(js))
+
+        assert rc == 0
+        md_text = md.read_text()
+        assert "| Fix |" in md_text  # Column exists even without fixes
+
+        data = json.loads(js.read_text())
+        # No fixes key when no fixes data
+        assert "fixes" not in data["categories"][0]
+
+    def test_auto_detects_fixes_json(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout",
+                    "is_flake": "yes",
+                    "test_id": "TestSlow",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+        # Put fixes.json in same dir as progress.md
+        self._make_fixes_json(tmp_path)
+
+        md = tmp_path / "report.md"
+        js = tmp_path / "report.json"
+        # Don't pass fixes_path -- should auto-detect
+        run(str(progress), str(md), str(js))
+
+        data = json.loads(js.read_text())
+        assert "fixes" in data["categories"][0]
