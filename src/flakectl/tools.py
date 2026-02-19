@@ -54,7 +54,14 @@ async def get_jobs(args):
 )
 async def download_log(args):
     job_id = args["job_id"]
-    output = args["output"]
+    output = os.path.join("files", os.path.basename(args["output"]))
+    os.makedirs("files", exist_ok=True)
+    if os.path.exists(output):
+        with open(output) as f:
+            total_lines = sum(1 for _ in f)
+        msg = f"Already saved to {output} ({total_lines} lines, cached)"
+        print(f"[job {job_id}] {msg}", file=sys.stderr, flush=True)
+        return {"content": [{"type": "text", "text": msg}]}
     print(
         f"[job {job_id}] Downloading log -> {output}...",
         file=sys.stderr, flush=True,
@@ -78,15 +85,17 @@ async def download_log(args):
 @tool(
     "get_file",
     "Download a file from the source repository at a specific git ref "
-    "(commit SHA, branch, or tag) and save it to disk. Returns line count "
-    "and save path. Use Grep/Read with head_limit/offset/limit to navigate "
-    "the saved file (same as with log files). Max file size 1MB.",
-    {"repo": str, "path": str, "ref": str, "output": str},
+    "(commit SHA, branch, or tag) and save it to disk. The file is saved "
+    "under files/{ref}/{repo_path} -- the response includes the local path. "
+    "Use Grep/Read with head_limit/offset/limit to navigate the saved file "
+    "(same as with log files). Max file size 1MB.",
+    {"repo": str, "path": str, "ref": str},
 )
 async def get_file(args):
     path = args["path"]
     ref = args["ref"]
-    output = args["output"]
+    output = os.path.join("files", ref[:8], path)
+    os.makedirs(os.path.dirname(output), exist_ok=True)
     if os.path.exists(output):
         with open(output) as f:
             total_lines = sum(1 for _ in f)
