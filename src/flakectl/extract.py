@@ -247,17 +247,7 @@ def run(
     total_runs = len(set(r["run_id"] for r in classified))
     total_flake_runs, total_bug_runs, total_unclear_runs = _summarize_runs(classified)
 
-    all_dates = []
-    for r in classified:
-        if r["run_started_at"]:
-            try:
-                dt = datetime.fromisoformat(
-                    r["run_started_at"].replace("Z", "+00:00")
-                ).date()
-                all_dates.append(dt)
-            except (ValueError, TypeError):
-                pass
-    analysis_date = max(all_dates) if all_dates else datetime.now(timezone.utc).date()
+    analysis_date = datetime.now(timezone.utc).date()
 
     categories = _build_category_data(sorted_cats, cat_descriptions, analysis_date)
 
