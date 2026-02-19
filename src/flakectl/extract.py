@@ -8,6 +8,7 @@ Parses the agent-filled progress.md coordination file and produces:
 
 import json
 import logging
+import os
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -139,7 +140,44 @@ def _lookup_description(category: str, cat_descriptions: dict[str, str]) -> str:
     return ""
 
 
-def _build_category_data(sorted_cats, cat_descriptions, analysis_date):
+def _load_fixes(fixes_path: str | None) -> dict[str, list[dict]]:
+    """Load fixes.json and return mapping: category_name -> list of fix items.
+
+    Returns empty dict if file is None, missing, or malformed.
+    """
+    if not fixes_path or not os.path.exists(fixes_path):
+        return {}
+    try:
+        with open(fixes_path) as f:
+            data = json.load(f)
+        return {
+            entry["category"]: entry["items"]
+            for entry in data.get("fixes", [])
+            if entry.get("category") and entry.get("items")
+        }
+    except (json.JSONDecodeError, KeyError, TypeError):
+        logger.warning("Could not parse %s, skipping fixes", fixes_path)
+        return {}
+
+
+def _format_fix_link(item: dict) -> str:
+    """Format a fix item as a markdown link.
+
+    PR:     [#123](url) or [#123](url) (possibly)
+    Commit: [abc1234](url) or [abc1234](url) (possibly)
+    """
+    if item.get("type") == "pr":
+        text = f"#{item['id']}"
+    else:
+        text = item["sha"][:7]
+    link = f"[{text}]({item['url']})"
+    if item.get("confidence") == "possible":
+        link += " (possibly)"
+    return link
+
+
+def _build_category_data(sorted_cats, cat_descriptions, analysis_date,
+                         fixes_by_cat=None):
     """Build a list of category summary dicts from sorted categories."""
     categories = []
     for cat, cat_rows in sorted_cats:
@@ -193,6 +231,7 @@ def _build_category_data(sorted_cats, cat_descriptions, analysis_date):
             "example_summary": example_summary,
             "last_occurred": last_rel,
             "affected_runs": affected,
+            "fixes": (fixes_by_cat or {}).get(cat, []),
         })
     return categories
 
@@ -201,12 +240,20 @@ def run(
     input_path: str = "progress.md",
     output_md: str = "report.md",
     output_json: str = "report.json",
+    fixes_path: str | None = None,
 ) -> int:
     """Extract results from progress.md into report files. Returns exit code."""
     with open(input_path) as f:
         content = f.read()
 
     cat_descriptions = parse_categories_section(content)
+
+    # Load fix correlations (auto-detect fixes.json in same dir if not given)
+    if fixes_path is None:
+        auto_path = os.path.join(os.path.dirname(input_path) or ".", "fixes.json")
+        if os.path.exists(auto_path):
+            fixes_path = auto_path
+    fixes_by_cat = _load_fixes(fixes_path)
 
     pattern = r"<!-- BEGIN RUN (\d+) -->(.*?)<!-- END RUN \1 -->"
     sections = re.findall(pattern, content, re.DOTALL)
@@ -284,7 +331,10 @@ def run(
 
     analysis_date = datetime.now(timezone.utc).date()
 
-    categories = _build_category_data(sorted_cats, cat_descriptions, analysis_date)
+    categories = _build_category_data(
+        sorted_cats, cat_descriptions, analysis_date,
+        fixes_by_cat=fixes_by_cat,
+    )
 
     # ---- Write report.md ----
     with open(output_md, "w") as f:
@@ -299,16 +349,21 @@ def run(
         f.write("Each category below maps to exactly **1 root cause / 1 fix**.\n\n")
 
         f.write("## Summary\n\n")
-        f.write("| # | Category | Subcategory | Runs/Jobs | Flake? | Last Occurred |\n")
-        f.write("|---|----------|-------------|-----------|--------|---------------|\n")
+        f.write("| # | Category | Subcategory | Runs/Jobs | Flake? | Last Occurred | Fix |\n")
+        f.write("|---|----------|-------------|-----------|--------|---------------|-----|\n")
 
         for i, cat_data in enumerate(categories, 1):
             subcats_str = ", ".join(cat_data["subcategories"])
+            fix_str = ", ".join(
+                _format_fix_link(item) for item in cat_data.get("fixes", [])
+                if item.get("confidence") == "match"
+            )
             f.write(
                 f"| {i} | `{cat_data['name']}` "
                 f"| {subcats_str} "
                 f"| {cat_data['run_count']}/{cat_data['job_count']} "
-                f"| {cat_data['flake']} | {cat_data['last_occurred']} |\n"
+                f"| {cat_data['flake']} | {cat_data['last_occurred']} "
+                f"| {fix_str} |\n"
             )
 
         f.write(
@@ -329,6 +384,12 @@ def run(
             f.write(f"- **Failed jobs:** {cat_data['job_count']}\n")
             if cat_data["test_ids"]:
                 f.write(f"- **Test IDs:** {', '.join(cat_data['test_ids'])}\n")
+
+            if cat_data.get("fixes"):
+                fix_links = ", ".join(
+                    _format_fix_link(item) for item in cat_data["fixes"]
+                )
+                f.write(f"- **Fix:** {fix_links}\n")
 
             error = cat_data["example_error"]
             if error:
@@ -369,7 +430,7 @@ def run(
     # ---- Write report.json ----
     json_categories = []
     for cat_data in categories:
-        json_categories.append({
+        json_cat = {
             "name": cat_data["name"],
             "description": cat_data["description"],
             "is_flake": cat_data["flake"],
@@ -380,7 +441,20 @@ def run(
             "example_error": cat_data["example_error"],
             "example_summary": cat_data["example_summary"],
             "affected_runs": cat_data["affected_runs"],
-        })
+        }
+        if cat_data.get("fixes"):
+            json_cat["fixes"] = [
+                {
+                    "type": item.get("type"),
+                    "id": item.get("id"),
+                    "sha": item.get("sha"),
+                    "url": item.get("url"),
+                    "title": item.get("title", ""),
+                    "confidence": item.get("confidence"),
+                }
+                for item in cat_data["fixes"]
+            ]
+        json_categories.append(json_cat)
 
     unfinished = [
         {"run_id": r["run_id"], "status": r["status"], "run_url": r["run_url"]}

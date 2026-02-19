@@ -26,9 +26,12 @@ inputs:
   stale-timeout:
     description: 'Safety limit: if no run finishes for this many minutes, cancel remaining work and report what was completed'
     default: '60'
-  max-turns:
+  max-turns-classify:
     description: 'Safety limit: max LLM round-trips each classifier agent can make before stopping'
-    default: '50'
+    default: '60'
+  max-turns-correlate:
+    description: 'Safety limit: max LLM round-trips the correlator agent can make before stopping'
+    default: '80'
   anthropic_api_key:
     description: 'Anthropic API key (for Claude)'
     required: true
@@ -75,7 +78,8 @@ runs:
           --context "${{ inputs.context }}" \
           --model "${{ inputs.model }}" \
           --stale-timeout "${{ inputs.stale-timeout }}" \
-          --max-turns "${{ inputs.max-turns }}"
+          --max-turns-classify "${{ inputs.max-turns-classify }}" \
+          --max-turns-correlate "${{ inputs.max-turns-correlate }}"
         RC=$?
         set -e
         if [[ "$RC" -ne 0 && "$RC" -ne 20 ]]; then

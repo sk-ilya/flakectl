@@ -138,6 +138,62 @@ def merge_run(progress_path: str, run_id: str, run_file_path: str,
     return True
 
 
+def _parse_field(text: str, field: str) -> str:
+    """Extract a field value from a section of text."""
+    match = re.search(rf"- \*\*{field}\*\*:\s*(.*)", text)
+    return match.group(1).strip() if match else ""
+
+
+def _rebuild_categories_section(progress_path: str) -> None:
+    """Rebuild the Categories So Far section from actual run data.
+
+    Scans all done/classified run blocks, extracts category fields,
+    groups by category (first 2 path segments), and replaces the
+    CATEGORIES START/END block with accurate entries.
+    """
+    content = Path(progress_path).read_text()
+
+    _VALID_PREFIXES = ("test-flake/", "infra-flake/", "bug/", "build-error/")
+
+    block_pattern = r"<!-- BEGIN RUN (\d+) -->(.*?)<!-- END RUN \1 -->"
+    cats: dict[str, str] = {}  # category -> first summary
+    for _, body in re.findall(block_pattern, content, re.DOTALL):
+        status = _parse_field(body, "status")
+        if status not in ("done", "classified"):
+            continue
+        job_pattern = r"#### job: `[^`]+`(.*?)(?=#### job:|\Z)"
+        for job_body in re.findall(job_pattern, body, re.DOTALL):
+            cat_val = _parse_field(job_body, "category")
+            if not cat_val or not cat_val.startswith(_VALID_PREFIXES):
+                continue
+            parts = cat_val.split("/")
+            cat_key = "/".join(parts[:2]) if len(parts) >= 2 else cat_val
+            if cat_key not in cats:
+                summary = _parse_field(job_body, "summary")
+                if summary and len(summary) > 120:
+                    summary = summary[:117] + "..."
+                cats[cat_key] = summary
+
+    if cats:
+        lines = []
+        for cat_key in sorted(cats):
+            desc = cats[cat_key]
+            if desc:
+                lines.append(f"- `{cat_key}` -- {desc}")
+            else:
+                lines.append(f"- `{cat_key}`")
+        section = "\n".join(lines)
+    else:
+        section = "(none yet)"
+
+    new_content = re.sub(
+        r"<!-- CATEGORIES START -->.*?<!-- CATEGORIES END -->",
+        f"<!-- CATEGORIES START -->\n{section}\n<!-- CATEGORIES END -->",
+        content, count=1, flags=re.DOTALL,
+    )
+    Path(progress_path).write_text(new_content)
+
+
 def _is_run_done(run_file: str, run_id: str) -> bool:
     """Check if a per-run file has status 'done'."""
     return run_id in _get_runs_by_status(run_file, "done")
@@ -241,7 +297,7 @@ async def _run_and_merge(
                             logger.info(
                                 "%s[run %s] %s%s",
                                 c, run_id,
-                                block.text.strip()[:200], _RESET)
+                                block.text.strip()[:600], _RESET)
 
             if not _is_run_classified(run_file, run_id):
                 return
@@ -254,6 +310,7 @@ async def _run_and_merge(
                 logger.error("%s[run %s] Preliminary merge FAILED%s",
                              c, run_id, _RESET)
                 return
+            _rebuild_categories_section(progress_path)
             logger.info("%s[run %s] Preliminary merge into %s%s",
                         c, run_id, progress_path, _RESET)
 
@@ -285,6 +342,7 @@ async def _run_and_merge(
                 ok = merge_run(progress_path, run_id, run_file)
             if ok:
                 merged.add(run_id)
+                _rebuild_categories_section(progress_path)
                 logger.info("%s[run %s] Final merge into %s%s",
                             c, run_id, progress_path, _RESET)
             else:
@@ -448,6 +506,10 @@ async def _classify_all(
             logger.error("%s[run %s] Classified straggler merge FAILED%s",
                          c, rid, _RESET)
 
+    # Rebuild categories one final time after all stragglers
+    if merged:
+        _rebuild_categories_section(progress_path)
+
     unfinished = run_id_set - merged
     logger.info("Merge summary: %d merged, %d done, %d unfinished",
                 len(merged), len(done), len(unfinished))
@@ -500,7 +562,7 @@ def _log_message(message):
         parts = []
         for block in message.content:
             if isinstance(block, TextBlock) and block.text.strip():
-                parts.append(f"text={block.text.strip()[:100]}")
+                parts.append(f"text={block.text.strip()[:300]}")
             elif isinstance(block, ToolUseBlock):
                 parts.append(f"tool={block.name}")
         logger.debug("AssistantMessage: %s", ", ".join(parts))

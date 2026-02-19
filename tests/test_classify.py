@@ -9,6 +9,8 @@ from flakectl.classify import (
     _get_runs_by_status,
     _is_run_classified,
     _is_run_done,
+    _parse_field,
+    _rebuild_categories_section,
     get_done_runs,
     get_pending_runs,
     mark_runs_as_error,
@@ -309,3 +311,311 @@ class TestBuildSystemPrompt:
         prompt = _build_system_prompt("This repo uses Go 1.22")
         assert "Repository-specific context" in prompt
         assert "This repo uses Go 1.22" in prompt
+
+
+# ---------------------------------------------------------------------------
+# _parse_field
+# ---------------------------------------------------------------------------
+
+class TestParseFieldClassify:
+    def test_basic(self):
+        text = "- **status**: done\n- **branch**: main"
+        assert _parse_field(text, "status") == "done"
+        assert _parse_field(text, "branch") == "main"
+
+    def test_missing(self):
+        assert _parse_field("- **status**: done", "branch") == ""
+
+    def test_empty_value(self):
+        assert _parse_field("- **category**:", "category") == ""
+
+
+# ---------------------------------------------------------------------------
+# _rebuild_categories_section
+# ---------------------------------------------------------------------------
+
+class TestRebuildCategoriesSection:
+    def _read_cats(self, path):
+        """Read the categories section and return as dict."""
+        import re
+        content = path.read_text()
+        m = re.search(
+            r"<!-- CATEGORIES START -->(.*?)<!-- CATEGORIES END -->",
+            content, re.DOTALL,
+        )
+        if not m:
+            return {}
+        cats = {}
+        for line in m.group(1).strip().split("\n"):
+            lm = re.match(r"- `([^`]+)`(?:\s*--\s*(.*))?", line.strip())
+            if lm:
+                cats[lm.group(1)] = (lm.group(2) or "").strip()
+        return cats
+
+    def test_single_done_run(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout/TestA",
+                    "is_flake": "yes",
+                    "summary": "Timed out waiting for response",
+                }],
+            },
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+
+        _rebuild_categories_section(str(p))
+
+        cats = self._read_cats(p)
+        assert "test-flake/timeout" in cats
+        assert "Timed out" in cats["test-flake/timeout"]
+
+    def test_multiple_categories(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout/TestA",
+                    "summary": "Timed out",
+                }],
+            },
+            {
+                "run_id": "200",
+                "status": "done",
+                "jobs": [{
+                    "name": "j2",
+                    "category": "infra-flake/registry-502",
+                    "summary": "Registry down",
+                }],
+            },
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+
+        _rebuild_categories_section(str(p))
+
+        cats = self._read_cats(p)
+        assert len(cats) == 2
+        assert "test-flake/timeout" in cats
+        assert "infra-flake/registry-502" in cats
+
+    def test_pending_runs_excluded(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout",
+                    "summary": "Done category",
+                }],
+            },
+            {
+                "run_id": "200",
+                "status": "pending",
+                "jobs": [{
+                    "name": "j2",
+                    "category": "bug/crash",
+                    "summary": "Should not appear",
+                }],
+            },
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+
+        _rebuild_categories_section(str(p))
+
+        cats = self._read_cats(p)
+        assert "test-flake/timeout" in cats
+        assert "bug/crash" not in cats
+
+    def test_classified_runs_included(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "classified",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/race",
+                    "summary": "Race condition",
+                }],
+            },
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+
+        _rebuild_categories_section(str(p))
+
+        cats = self._read_cats(p)
+        assert "test-flake/race" in cats
+
+    def test_deduplicates_same_category(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout/TestA",
+                    "summary": "First summary",
+                }],
+            },
+            {
+                "run_id": "200",
+                "status": "done",
+                "jobs": [{
+                    "name": "j2",
+                    "category": "test-flake/timeout/TestB",
+                    "summary": "Second summary",
+                }],
+            },
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+
+        _rebuild_categories_section(str(p))
+
+        cats = self._read_cats(p)
+        assert len(cats) == 1
+        assert "test-flake/timeout" in cats
+        # Uses first summary seen
+        assert "First summary" in cats["test-flake/timeout"]
+
+    def test_multi_job_run(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "jobs": [
+                    {
+                        "name": "j1",
+                        "category": "test-flake/timeout/TestA",
+                        "summary": "Timeout in TestA",
+                    },
+                    {
+                        "name": "j2",
+                        "category": "infra-flake/network",
+                        "summary": "Network error",
+                    },
+                ],
+            },
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+
+        _rebuild_categories_section(str(p))
+
+        cats = self._read_cats(p)
+        assert len(cats) == 2
+        assert "test-flake/timeout" in cats
+        assert "infra-flake/network" in cats
+
+    def test_no_done_runs_writes_none_yet(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "pending",
+                "jobs": [{"name": "j1"}],
+            },
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+
+        _rebuild_categories_section(str(p))
+
+        text = p.read_text()
+        assert "(none yet)" in text
+
+    def test_replaces_stale_section(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout",
+                    "summary": "Correct category",
+                }],
+            },
+        ])
+        # Inject a wrong category into the section
+        content = content.replace(
+            "(none yet)",
+            "- `bug/wrong-category` -- This is stale",
+        )
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+
+        _rebuild_categories_section(str(p))
+
+        cats = self._read_cats(p)
+        assert "bug/wrong-category" not in cats
+        assert "test-flake/timeout" in cats
+
+    def test_long_summary_truncated(self, tmp_path):
+        long_summary = "A" * 200
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout",
+                    "summary": long_summary,
+                }],
+            },
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+
+        _rebuild_categories_section(str(p))
+
+        cats = self._read_cats(p)
+        desc = cats["test-flake/timeout"]
+        assert len(desc) <= 125  # 117 + "..."
+        assert desc.endswith("...")
+
+    def test_empty_category_field_skipped(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "jobs": [{"name": "j1", "category": ""}],
+            },
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+
+        _rebuild_categories_section(str(p))
+
+        text = p.read_text()
+        assert "(none yet)" in text
+
+    def test_categories_sorted_alphabetically(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "jobs": [
+                    {"name": "j1", "category": "test-flake/zz-last", "summary": "Z"},
+                    {"name": "j2", "category": "bug/aa-first", "summary": "A"},
+                    {"name": "j3", "category": "infra-flake/mm-middle", "summary": "M"},
+                ],
+            },
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+
+        _rebuild_categories_section(str(p))
+
+        text = p.read_text()
+        pos_bug = text.index("bug/aa-first")
+        pos_infra = text.index("infra-flake/mm-middle")
+        pos_test = text.index("test-flake/zz-last")
+        assert pos_bug < pos_infra < pos_test
