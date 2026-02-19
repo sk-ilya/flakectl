@@ -14,7 +14,6 @@ from flakectl.fetch import (
     write_csv,
 )
 
-
 # ---------------------------------------------------------------------------
 # filter_runs_by_date
 # ---------------------------------------------------------------------------
@@ -236,5 +235,8 @@ class TestWriteCsv:
         with open(out) as f:
             header = f.readline().strip()
 
-        expected = "run_id,run_url,branch,event,commit_sha,failed_job_name,run_started_at,job_completed_at,run_attempt,failure_step"
+        expected = (
+            "run_id,run_url,branch,event,commit_sha,failed_job_name,"
+            "run_started_at,job_completed_at,run_attempt,failure_step"
+        )
         assert header == expected

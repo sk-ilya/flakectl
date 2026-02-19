@@ -10,10 +10,8 @@ categories.
 """
 
 import asyncio
-import json
 import logging
 import os
-import re
 import time
 from pathlib import Path
 
@@ -22,215 +20,118 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
-    SystemMessage,
-    TextBlock,
-    ToolUseBlock,
-    UserMessage,
 )
 
-from flakectl.prompts.classifier import CLASSIFIER_AGENT_PROMPT
+from flakectl.agentlog import RESET, agent_color, log_blocks
+from flakectl.progressfile import (
+    get_done_runs,
+    get_pending_runs,
+    is_run_classified,
+    is_run_done,
+    mark_runs_as_error,
+    merge_run,
+    promote_run_status,
+    rebuild_categories_section,
+    split_progress,
+)
+from flakectl.prompts.classifier import RECHECK_PROMPT, build_system_prompt
 from flakectl.tools import create_github_tools_server
 
 logger = logging.getLogger(__name__)
 
-_AGENT_COLORS = [
-    "\033[91m", "\033[92m", "\033[93m", "\033[94m", "\033[95m", "\033[96m",
-    "\033[31m", "\033[32m", "\033[33m", "\033[34m", "\033[35m", "\033[36m",
-]
-_RESET = "\033[0m"
 
+async def _run_agent_phase(
+    client, prompt, check_fn, run_file: str, run_id: str,
+    phase_name: str, color: str, max_turns: int | None = None,
+) -> bool:
+    """Run one agent phase (query + receive loop), return whether check_fn passes.
 
-def _agent_color(run_id: str) -> str:
-    """Return a deterministic ANSI color for a given run ID."""
-    return _AGENT_COLORS[hash(run_id) % len(_AGENT_COLORS)]
-
-
-def _tool_summary(block: ToolUseBlock) -> str:
-    """Format a one-line summary of a tool call."""
-    return f"{block.name}: {json.dumps(block.input, ensure_ascii=False)}"
-
-
-def _get_runs_by_status(progress_path: str, status: str) -> list[str]:
-    """Parse progress.md and return run IDs matching the given status."""
-    content = Path(progress_path).read_text()
-    block_pattern = r"<!-- BEGIN RUN (\d+) -->(.*?)<!-- END RUN \1 -->"
-    status_pattern = rf"- \*\*status\*\*: {re.escape(status)}"
-    return [
-        rid for rid, body in re.findall(block_pattern, content, re.DOTALL)
-        if re.search(status_pattern, body)
-    ]
-
-
-def get_pending_runs(progress_path: str) -> list[str]:
-    """Parse progress.md and return list of pending run IDs."""
-    return _get_runs_by_status(progress_path, "pending")
-
-
-def get_done_runs(progress_path: str) -> list[str]:
-    """Parse progress.md and return list of done run IDs."""
-    return _get_runs_by_status(progress_path, "done")
-
-
-def mark_runs_as_error(progress_path: str, run_ids: list[str]) -> None:
-    """Set status to 'error' for the given run IDs in progress.md.
-
-    Only replaces 'pending' status -- will not overwrite 'done' if a
-    sub-agent finished between the check and the write.
+    Logs success/failure with turn count. When max_turns is provided, the
+    failure message notes whether the turn limit was hit.
     """
-    content = Path(progress_path).read_text()
-    for rid in run_ids:
-        pattern = (
-            r"(<!-- BEGIN RUN " + re.escape(rid) + r" -->.*?)"
-            r"- \*\*status\*\*: pending"
-        )
-        replacement = r"\1- **status**: error"
-        content = re.sub(pattern, replacement, content, count=1, flags=re.DOTALL)
-    Path(progress_path).write_text(content)
-
-
-def split_progress(progress_path: str, run_ids: list[str]) -> dict[str, str]:
-    """Split progress.md into per-run files. Returns {run_id: file_path}."""
-    content = Path(progress_path).read_text()
-    runs_dir = Path(progress_path).parent / "runs"
-    runs_dir.mkdir(exist_ok=True)
-
-    run_files = {}
-    for rid in run_ids:
-        pattern = rf"(<!-- BEGIN RUN {re.escape(rid)} -->.*?<!-- END RUN {re.escape(rid)} -->)"
-        match = re.search(pattern, content, re.DOTALL)
-        if not match:
-            logger.warning("Run %s not found in %s", rid, progress_path)
-            continue
-        run_file = runs_dir / f"run-{rid}.md"
-        run_file.write_text(match.group(1) + "\n")
-        run_files[rid] = str(run_file)
-
-    return run_files
-
-
-def merge_run(progress_path: str, run_id: str, run_file_path: str,
-              expected_status: str = "done") -> bool:
-    """Merge one per-run file back into progress.md. Returns True on success."""
-    content = Path(progress_path).read_text()
-    run_content = Path(run_file_path).read_text()
-
-    pattern = rf"(<!-- BEGIN RUN {re.escape(run_id)} -->.*?<!-- END RUN {re.escape(run_id)} -->)"
-    match = re.search(pattern, run_content, re.DOTALL)
-    if not match:
-        logger.warning("Run section not found in %s, skipping", run_file_path)
-        return False
-
-    new_content, count = re.subn(pattern, match.group(1), content, count=1, flags=re.DOTALL)
-    if count == 0:
-        logger.warning("Run %s block not found in %s, nothing to replace",
-                       run_id, progress_path)
-        return False
-
-    Path(progress_path).write_text(new_content)
-
-    # Verify the merge
-    if run_id not in _get_runs_by_status(progress_path, expected_status):
-        logger.error("Run %s merge verification FAILED -- "
-                     "status not %r in %s after write",
-                     run_id, expected_status, progress_path)
-        return False
-
-    return True
-
-
-def _parse_field(text: str, field: str) -> str:
-    """Extract a field value from a section of text."""
-    match = re.search(rf"- \*\*{field}\*\*:\s*(.*)", text)
-    return match.group(1).strip() if match else ""
-
-
-def _rebuild_categories_section(progress_path: str) -> None:
-    """Rebuild the Categories So Far section from actual run data.
-
-    Scans all done/classified run blocks, extracts category fields,
-    groups by category (first 2 path segments), and replaces the
-    CATEGORIES START/END block with accurate entries.
-    """
-    content = Path(progress_path).read_text()
-
-    _VALID_PREFIXES = ("test-flake/", "infra-flake/", "bug/", "build-error/")
-
-    block_pattern = r"<!-- BEGIN RUN (\d+) -->(.*?)<!-- END RUN \1 -->"
-    cats: dict[str, str] = {}  # category -> first summary
-    for _, body in re.findall(block_pattern, content, re.DOTALL):
-        status = _parse_field(body, "status")
-        if status not in ("done", "classified"):
-            continue
-        job_pattern = r"#### job: `[^`]+`(.*?)(?=#### job:|\Z)"
-        for job_body in re.findall(job_pattern, body, re.DOTALL):
-            cat_val = _parse_field(job_body, "category")
-            if not cat_val or not cat_val.startswith(_VALID_PREFIXES):
-                continue
-            parts = cat_val.split("/")
-            cat_key = "/".join(parts[:2]) if len(parts) >= 2 else cat_val
-            if cat_key not in cats:
-                summary = _parse_field(job_body, "summary")
-                if summary and len(summary) > 120:
-                    summary = summary[:117] + "..."
-                cats[cat_key] = summary
-
-    if cats:
-        lines = []
-        for cat_key in sorted(cats):
-            desc = cats[cat_key]
-            if desc:
-                lines.append(f"- `{cat_key}` -- {desc}")
+    await client.query(prompt)
+    async for message in client.receive_messages():
+        if isinstance(message, ResultMessage):
+            if check_fn(run_file, run_id):
+                logger.info(
+                    "%s[run %s] %s done in %d turns%s",
+                    color, run_id, phase_name.capitalize(),
+                    message.num_turns, RESET)
             else:
-                lines.append(f"- `{cat_key}`")
-        section = "\n".join(lines)
-    else:
-        section = "(none yet)"
-
-    new_content = re.sub(
-        r"<!-- CATEGORIES START -->.*?<!-- CATEGORIES END -->",
-        f"<!-- CATEGORIES START -->\n{section}\n<!-- CATEGORIES END -->",
-        content, count=1, flags=re.DOTALL,
-    )
-    Path(progress_path).write_text(new_content)
-
-
-def _is_run_done(run_file: str, run_id: str) -> bool:
-    """Check if a per-run file has status 'done'."""
-    return run_id in _get_runs_by_status(run_file, "done")
+                if max_turns is not None and message.num_turns >= max_turns:
+                    reason = f"hit max_turns={max_turns}"
+                else:
+                    reason = "exited early"
+                logger.warning(
+                    "%s[run %s] %s exited without completing "
+                    "(%s, %d turns)%s",
+                    color, run_id, phase_name.capitalize(), reason,
+                    message.num_turns, RESET)
+            break
+        elif isinstance(message, AssistantMessage):
+            log_blocks(message, f"{color}[run {run_id}] {phase_name}: ", RESET)
+    return check_fn(run_file, run_id)
 
 
-def _is_run_classified(run_file: str, run_id: str) -> bool:
-    """Check if a per-run file has status 'classified'."""
-    return run_id in _get_runs_by_status(run_file, "classified")
+def _scan_run_statuses(
+    run_ids: set[str], run_files: dict[str, str],
+) -> tuple[set[str], set[str]]:
+    """Scan per-run files, return (done, classified) sets."""
+    done = set()
+    classified = set()
+    for rid in run_ids:
+        if rid in run_files:
+            if is_run_done(run_files[rid], rid):
+                done.add(rid)
+            elif is_run_classified(run_files[rid], rid):
+                classified.add(rid)
+    return done, classified
 
 
-_RECHECK_PROMPT = """\
-Your results have been merged into progress.md. Other agents have also
-merged their results while you were working.
+def _merge_stragglers(
+    run_id_set: set[str], run_files: dict[str, str],
+    progress_path: str, merged: set[str],
+) -> set[str]:
+    """Merge unmerged done/classified runs. Returns final done set. Mutates merged.
 
-Re-read progress.md now and check all categories across all completed runs.
-Compare by category (the first two path segments). If another agent used
-a different category for the same root cause (same fix), update your
-per-run file to use that category instead (keeping your own subcategory).
-Pick the category used by the most runs; break ties by earliest
-run_started_at. Do NOT edit progress.md directly.
+    Called after all asyncio tasks are done/cancelled -- no concurrency concerns.
+    Done stragglers are merged first, then classified stragglers (promoted to done).
+    """
+    done, classified_only = _scan_run_statuses(run_id_set, run_files)
 
-Then set your run status to "done" (replace "classified" with "done").
+    stragglers = done - merged
+    if stragglers:
+        logger.info("Merging %d straggler runs (done): %s",
+                    len(stragglers), sorted(stragglers))
+    for rid in stragglers:
+        c = agent_color(rid)
+        ok = merge_run(progress_path, rid, run_files[rid])
+        if ok:
+            merged.add(rid)
+            logger.info("%s[run %s] Straggler merged into %s%s",
+                        c, rid, progress_path, RESET)
+        else:
+            logger.error("%s[run %s] Straggler merge FAILED%s", c, rid, RESET)
 
-Hint: a single full read of progress.md should give you everything you
-need -- avoid multiple greps or partial reads.
-"""
+    classified_stragglers = classified_only - merged
+    if classified_stragglers:
+        logger.info("Merging %d straggler runs (classified only): %s",
+                    len(classified_stragglers), sorted(classified_stragglers))
+    for rid in classified_stragglers:
+        c = agent_color(rid)
+        ok = merge_run(progress_path, rid, run_files[rid],
+                       expected_status="classified")
+        if ok:
+            promote_run_status(progress_path, rid, "classified", "done")
+            merged.add(rid)
+            done.add(rid)
+            logger.info("%s[run %s] Classified straggler merged into %s%s",
+                        c, rid, progress_path, RESET)
+        else:
+            logger.error("%s[run %s] Classified straggler merge FAILED%s",
+                         c, rid, RESET)
 
-
-def _build_system_prompt(context: str = "") -> str:
-    """Build the system prompt for classifier agents."""
-    prompt = CLASSIFIER_AGENT_PROMPT
-    if context:
-        prompt += (
-            "\n\n## Repository-specific context (provided by the user -- high priority)\n\n"
-            + context
-        )
-    return prompt
+    return done
 
 
 async def _run_and_merge(
@@ -247,7 +148,7 @@ async def _run_and_merge(
     recheck. The merge between phases ensures the recheck reads up-to-date
     categories from progress.md.
     """
-    system_prompt = _build_system_prompt(context=context)
+    system_prompt = build_system_prompt(context=context)
     task = (
         f"Classify run {run_id}. REPO={repo}. "
         f"Your progress file: {run_file}. "
@@ -265,92 +166,49 @@ async def _run_and_merge(
         cwd=cwd,
         mcp_servers={"github": create_github_tools_server()},
     )
-    c = _agent_color(run_id)
+    c = agent_color(run_id)
     try:
         async with ClaudeSDKClient(options=options) as client:
-            # --- Phase 1: Classify ---
-            await client.query(task)
-            async for message in client.receive_messages():
-                if isinstance(message, ResultMessage):
-                    if _is_run_classified(run_file, run_id):
-                        logger.info(
-                            "%s[run %s] Classified in %d turns%s",
-                            c, run_id, message.num_turns, _RESET)
-                    else:
-                        reason = ("hit max_turns=%d" % max_turns
-                                  if message.num_turns >= max_turns
-                                  else "exited early")
-                        logger.warning(
-                            "%s[run %s] Classify exited WITHOUT completing "
-                            "(%s, %d turns)%s",
-                            c, run_id, reason,
-                            message.num_turns, _RESET)
-                    break
-                elif isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, ToolUseBlock):
-                            logger.info("%s[run %s] %s%s",
-                                        c, run_id,
-                                        _tool_summary(block), _RESET)
-                        elif (isinstance(block, TextBlock)
-                              and block.text.strip()):
-                            logger.info(
-                                "%s[run %s] %s%s",
-                                c, run_id,
-                                block.text.strip()[:600], _RESET)
-
-            if not _is_run_classified(run_file, run_id):
+            # Phase 1: Classify
+            ok = await _run_agent_phase(
+                client, task, is_run_classified, run_file, run_id,
+                "classify", c, max_turns=max_turns)
+            if not ok:
                 return
 
-            # --- Preliminary merge: make results visible to other agents ---
+            # Preliminary merge: make results visible to other agents
             async with merge_lock:
                 ok = merge_run(progress_path, run_id, run_file,
                                expected_status="classified")
             if not ok:
                 logger.error("%s[run %s] Preliminary merge FAILED%s",
-                             c, run_id, _RESET)
+                             c, run_id, RESET)
                 return
-            _rebuild_categories_section(progress_path)
+            rebuild_categories_section(progress_path)
             logger.info("%s[run %s] Preliminary merge into %s%s",
-                        c, run_id, progress_path, _RESET)
+                        c, run_id, progress_path, RESET)
 
-            # --- Phase 2: Recheck (same session, agent has full context) ---
-            await client.query(_RECHECK_PROMPT)
-            async for message in client.receive_messages():
-                if isinstance(message, ResultMessage):
-                    if _is_run_done(run_file, run_id):
-                        logger.info(
-                            "%s[run %s] Recheck done in %d turns%s",
-                            c, run_id, message.num_turns, _RESET)
-                    else:
-                        logger.warning(
-                            "%s[run %s] Recheck exited without setting done%s",
-                            c, run_id, _RESET)
-                    break
-                elif isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, ToolUseBlock):
-                            logger.info("%s[run %s] recheck: %s%s",
-                                        c, run_id,
-                                        _tool_summary(block), _RESET)
-
-            if not _is_run_done(run_file, run_id):
+            # Phase 2: Recheck (same session, agent has full context)
+            ok = await _run_agent_phase(
+                client, RECHECK_PROMPT, is_run_done, run_file, run_id,
+                "recheck", c)
+            if not ok:
                 return
 
-            # --- Final merge: update with any category changes from recheck ---
+            # Final merge: update with any category changes from recheck
             async with merge_lock:
                 ok = merge_run(progress_path, run_id, run_file)
             if ok:
                 merged.add(run_id)
-                _rebuild_categories_section(progress_path)
+                rebuild_categories_section(progress_path)
                 logger.info("%s[run %s] Final merge into %s%s",
-                            c, run_id, progress_path, _RESET)
+                            c, run_id, progress_path, RESET)
             else:
                 logger.error("%s[run %s] Final merge FAILED%s",
-                             c, run_id, _RESET)
+                             c, run_id, RESET)
     except Exception as e:
         logger.warning("%s[run %s] Agent crashed: %s%s",
-                       c, run_id, e, _RESET)
+                       c, run_id, e, RESET)
 
 
 async def _classify_all(
@@ -394,15 +252,7 @@ async def _classify_all(
     while True:
         await asyncio.sleep(30)
 
-        # Check per-run files for completion
-        done = set()
-        classified = set()
-        for rid in run_id_set:
-            if rid in run_files:
-                if _is_run_done(run_files[rid], rid):
-                    done.add(rid)
-                elif _is_run_classified(run_files[rid], rid):
-                    classified.add(rid)
+        done, classified = _scan_run_statuses(run_id_set, run_files)
         remaining = run_id_set - done
 
         logger.info("Poll: %d/%d done, %d classified, %d remaining",
@@ -456,59 +306,10 @@ async def _classify_all(
         # Yield to let cancellation propagate
         await asyncio.sleep(0)
 
-    # Final check + merge any stragglers (done or classified)
-    done = set()
-    classified_only = set()
-    for rid in run_id_set:
-        if rid in run_files:
-            if _is_run_done(run_files[rid], rid):
-                done.add(rid)
-            elif _is_run_classified(run_files[rid], rid):
-                classified_only.add(rid)
-    stragglers = done - merged
-    if stragglers:
-        logger.info("Merging %d straggler runs (done): %s",
-                    len(stragglers), sorted(stragglers))
-    for rid in stragglers:
-        c = _agent_color(rid)
-        ok = merge_run(progress_path, rid, run_files[rid])
-        if ok:
-            merged.add(rid)
-            logger.info("%s[run %s] Straggler merged into %s%s",
-                        c, rid, progress_path, _RESET)
-        else:
-            logger.error("%s[run %s] Straggler merge FAILED%s", c, rid, _RESET)
-    # Also merge runs stuck at "classified" (recheck was cancelled)
-    classified_stragglers = classified_only - merged
-    if classified_stragglers:
-        logger.info("Merging %d straggler runs (classified only): %s",
-                    len(classified_stragglers), sorted(classified_stragglers))
-    for rid in classified_stragglers:
-        c = _agent_color(rid)
-        ok = merge_run(progress_path, rid, run_files[rid],
-                       expected_status="classified")
-        if ok:
-            # Promote status from "classified" to "done" so extract.py
-            # includes these runs in the final report.
-            content = Path(progress_path).read_text()
-            pattern = (
-                r"(<!-- BEGIN RUN " + re.escape(rid) + r" -->.*?)"
-                r"- \*\*status\*\*: classified"
-            )
-            content = re.sub(pattern, r"\1- **status**: done",
-                             content, count=1, flags=re.DOTALL)
-            Path(progress_path).write_text(content)
-            merged.add(rid)
-            done.add(rid)
-            logger.info("%s[run %s] Classified straggler merged into %s%s",
-                        c, rid, progress_path, _RESET)
-        else:
-            logger.error("%s[run %s] Classified straggler merge FAILED%s",
-                         c, rid, _RESET)
+    done = _merge_stragglers(run_id_set, run_files, progress_path, merged)
 
-    # Rebuild categories one final time after all stragglers
     if merged:
-        _rebuild_categories_section(progress_path)
+        rebuild_categories_section(progress_path)
 
     unfinished = run_id_set - merged
     logger.info("Merge summary: %d merged, %d done, %d unfinished",
@@ -516,7 +317,11 @@ async def _classify_all(
     return done, unfinished
 
 
-async def run_orchestrator(repo: str, progress: str, workdir: str | None = None, context: str = "", model: str = "sonnet", stale_timeout_min: int = 60, max_turns: int = 50):
+async def run_orchestrator(
+    repo: str, progress: str, workdir: str | None = None,
+    context: str = "", model: str = "sonnet",
+    stale_timeout_min: int = 60, max_turns: int = 50,
+):
     pending = get_pending_runs(progress)
     if not pending:
         logger.info("No pending runs found")
@@ -556,26 +361,6 @@ async def run_orchestrator(repo: str, progress: str, workdir: str | None = None,
 
 
 
-def _log_message(message):
-    """Log SDK messages: ResultMessage at INFO, everything else at DEBUG."""
-    if isinstance(message, AssistantMessage):
-        parts = []
-        for block in message.content:
-            if isinstance(block, TextBlock) and block.text.strip():
-                parts.append(f"text={block.text.strip()[:300]}")
-            elif isinstance(block, ToolUseBlock):
-                parts.append(f"tool={block.name}")
-        logger.debug("AssistantMessage: %s", ", ".join(parts))
-    elif isinstance(message, ResultMessage):
-        logger.info("Session complete: %d turns",
-                     message.num_turns)
-    elif isinstance(message, SystemMessage):
-        logger.debug("SystemMessage: %s", message.subtype)
-    elif isinstance(message, UserMessage):
-        logger.debug("UserMessage (tool_use_id=%s)",
-                      getattr(message, "parent_tool_use_id", None))
-
-
 async def _run_summarize(report_md: str, progress: str, cwd: str, model: str = "sonnet") -> None:
     """Launch a postprocess agent to write summary.txt from report.md."""
     system = "Summarize CI failure classification results in concise plain text."
@@ -599,24 +384,37 @@ If you need more detail about specific runs, you can also read {progress}.
     async with ClaudeSDKClient(options=options) as client:
         await client.query(task)
         async for message in client.receive_messages():
-            _log_message(message)
             if isinstance(message, ResultMessage):
+                logger.info("[summarize] Done in %d turns",
+                            message.num_turns)
                 break
+            elif isinstance(message, AssistantMessage):
+                log_blocks(message, "[summarize] ")
 
     summary_path = Path(cwd) / "summary.txt"
     if summary_path.exists():
         logger.info("\n%s", summary_path.read_text().strip())
 
 
-def run_summarize(report_md: str, progress: str = "progress.md", workdir: str | None = None, model: str = "sonnet") -> None:
+def run_summarize(
+    report_md: str, progress: str = "progress.md",
+    workdir: str | None = None, model: str = "sonnet",
+) -> None:
     """Generate summary.txt from report.md."""
     cwd = workdir or os.getcwd()
     asyncio.run(_run_summarize(report_md, progress, cwd, model=model))
 
 
-def run(repo: str, progress: str = "progress.md", workdir: str | None = None, context: str = "", model: str = "sonnet", stale_timeout_min: int = 60, max_turns: int = 50) -> int:
+def run(
+    repo: str, progress: str = "progress.md", workdir: str | None = None,
+    context: str = "", model: str = "sonnet",
+    stale_timeout_min: int = 60, max_turns: int = 50,
+) -> int:
     """Run the classification orchestrator. Returns 0 on success, 1 if no runs completed."""
-    asyncio.run(run_orchestrator(repo, progress, workdir, context=context, model=model, stale_timeout_min=stale_timeout_min, max_turns=max_turns))
+    asyncio.run(run_orchestrator(
+        repo, progress, workdir, context=context, model=model,
+        stale_timeout_min=stale_timeout_min, max_turns=max_turns,
+    ))
     done = get_done_runs(progress)
     if not done:
         return 1

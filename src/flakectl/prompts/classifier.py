@@ -343,3 +343,35 @@ re-read progress.md before creating a new category and again after you finish.
 
 The REPO value is passed to you in the task description.
 """
+
+
+RECHECK_PROMPT = """\
+Your results have been merged into progress.md. Other agents have also
+merged their results while you were working.
+
+Re-read progress.md now. The "Categories So Far" section contains the
+full up-to-date list of categories from all agents that have merged so
+far. Check whether any of your categories overlap in root cause with
+an existing one -- two differently-worded slugs can describe the same
+root cause. Compare summaries and error_message fields to decide: would
+the same fix resolve both? If so, update your per-run file to use the
+existing category (keeping your own subcategory). Pick the category used
+by the most runs; break ties by earliest run_started_at.
+
+Do NOT edit progress.md directly -- only edit your per-run file.
+Then set your run status to "done" (replace "classified" with "done").
+
+Hint: a single full read of progress.md should give you everything you
+need -- avoid multiple greps or partial reads.
+"""
+
+
+def build_system_prompt(context: str = "") -> str:
+    """Build the system prompt for classifier agents."""
+    prompt = CLASSIFIER_AGENT_PROMPT
+    if context:
+        prompt += (
+            "\n\n## Repository-specific context (provided by the user -- high priority)\n\n"
+            + context
+        )
+    return prompt

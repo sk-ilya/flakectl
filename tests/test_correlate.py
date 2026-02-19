@@ -3,8 +3,8 @@
 import json
 
 from conftest import make_progress_content
-from flakectl.correlate import _extract_branches, _has_categories
 
+from flakectl.correlate import _extract_branches, _has_categories
 
 # ---------------------------------------------------------------------------
 # _extract_branches

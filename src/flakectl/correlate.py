@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from claude_agent_sdk import (
@@ -20,11 +20,10 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
-    TextBlock,
-    ToolUseBlock,
 )
 
-from flakectl.extract import parse_categories_section
+from flakectl.agentlog import log_blocks
+from flakectl.progressfile import RUN_BLOCK_RE, parse_categories_section
 from flakectl.prompts.correlator import CORRELATOR_AGENT_PROMPT
 from flakectl.tools import create_correlate_tools_server
 
@@ -34,8 +33,7 @@ logger = logging.getLogger(__name__)
 def _extract_branches(content: str) -> list[str]:
     """Extract unique branch names from done runs in progress.md."""
     branches = set()
-    block_pattern = r"<!-- BEGIN RUN (\d+) -->(.*?)<!-- END RUN \1 -->"
-    for _, body in re.findall(block_pattern, content, re.DOTALL):
+    for _, body in re.findall(RUN_BLOCK_RE, content, re.DOTALL):
         match = re.search(r"- \*\*branch\*\*:\s*(.*)", body)
         if match:
             branch = match.group(1).strip()
@@ -71,7 +69,10 @@ def _dump_candidates(
     prs_path = os.path.join(cwd, "candidates_prs.tsv")
 
     # All commits in the lookback window
-    jq_commits = '.[] | "\\(.sha)\\t\\(.commit.author.date)\\t\\(.commit.message | split("\\n")[0])"'
+    jq_commits = (
+        '.[] | "\\(.sha)\\t\\(.commit.author.date)'
+        '\\t\\(.commit.message | split("\\n")[0])"'
+    )
     try:
         result = subprocess.run(
             ["gh", "api",
@@ -104,14 +105,6 @@ def _dump_candidates(
     return commits_path, n_commits, prs_path, n_prs
 
 
-def _tool_summary(block: ToolUseBlock) -> str:
-    """Format a one-line summary of a tool call."""
-    inp = json.dumps(block.input, ensure_ascii=False)
-    if len(inp) > 150:
-        inp = inp[:147] + "..."
-    return f"{block.name}: {inp}"
-
-
 async def _run_correlator(
     repo: str,
     progress_path: str,
@@ -127,7 +120,7 @@ async def _run_correlator(
 ) -> None:
     """Launch a single correlator agent to match categories to fixes."""
     since_date = (
-        datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        datetime.now(UTC) - timedelta(days=lookback_days)
     ).strftime("%Y-%m-%d")
 
     task = (
@@ -168,17 +161,7 @@ async def _run_correlator(
                 )
                 break
             elif isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, ToolUseBlock):
-                        logger.info(
-                            "[correlate] %s", _tool_summary(block),
-                        )
-                    elif (isinstance(block, TextBlock)
-                          and block.text.strip()):
-                        logger.info(
-                            "[correlate] %s",
-                            block.text.strip()[:600],
-                        )
+                log_blocks(message, "[correlate] ")
 
 
 def run(
@@ -209,7 +192,7 @@ def run(
 
     # Pre-dump commits and open PRs for the agent to grep
     since_date = (
-        datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        datetime.now(UTC) - timedelta(days=lookback_days)
     ).strftime("%Y-%m-%d")
     commits_path, n_commits, prs_path, n_prs = _dump_candidates(
         repo, since_date, cwd,

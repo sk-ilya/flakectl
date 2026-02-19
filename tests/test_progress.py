@@ -1,6 +1,7 @@
 """Tests for flakectl.progress -- CSV-to-markdown transform."""
 
 from conftest import make_csv_content
+
 from flakectl.progress import run
 
 

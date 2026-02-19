@@ -7,7 +7,7 @@ and writes it to a CSV file for flaky test analysis.
 
 import csv
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from flakectl.github import list_failed_jobs, list_failed_runs_multi
 
@@ -22,7 +22,7 @@ def filter_runs_by_date(runs: list[dict], since_date: str) -> list[dict]:
     """Filter runs to only include those since the given ISO date."""
     if not runs:
         return []
-    cutoff = datetime.fromisoformat(since_date).replace(tzinfo=timezone.utc)
+    cutoff = datetime.fromisoformat(since_date).replace(tzinfo=UTC)
     result = []
     for run in runs:
         created_at = datetime.fromisoformat(
@@ -127,7 +127,7 @@ def run(
 ) -> int:
     """Fetch failed CI jobs and write to CSV. Returns status code."""
     since_date = (
-        datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        datetime.now(UTC) - timedelta(days=lookback_days)
     ).strftime("%Y-%m-%d")
 
     workflows = parse_list_arg(workflow)
