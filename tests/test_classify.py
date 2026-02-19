@@ -1,41 +1,39 @@
-"""Tests for flakectl.classify -- file-based helpers (no SDK)."""
+"""Tests for progress file helpers and classifier utilities."""
 
-import pytest
 
 from conftest import make_progress_content
-from flakectl.classify import (
-    _agent_color,
-    _build_system_prompt,
-    _get_runs_by_status,
-    _is_run_classified,
-    _is_run_done,
-    _parse_field,
-    _rebuild_categories_section,
+
+from flakectl.agentlog import agent_color
+from flakectl.progressfile import (
     get_done_runs,
     get_pending_runs,
+    get_runs_by_status,
+    is_run_classified,
+    is_run_done,
     mark_runs_as_error,
     merge_run,
+    rebuild_categories_section,
     split_progress,
 )
-
+from flakectl.prompts.classifier import build_system_prompt
 
 # ---------------------------------------------------------------------------
-# _agent_color
+# agent_color
 # ---------------------------------------------------------------------------
 
 class TestAgentColor:
     def test_deterministic(self):
-        c1 = _agent_color("12345")
-        c2 = _agent_color("12345")
+        c1 = agent_color("12345")
+        c2 = agent_color("12345")
         assert c1 == c2
 
     def test_returns_ansi_escape(self):
-        color = _agent_color("12345")
+        color = agent_color("12345")
         assert color.startswith("\033[")
 
 
 # ---------------------------------------------------------------------------
-# _get_runs_by_status / get_pending_runs / get_done_runs
+# get_runs_by_status / get_pending_runs / get_done_runs
 # ---------------------------------------------------------------------------
 
 class TestGetRunsByStatus:
@@ -77,7 +75,7 @@ class TestGetRunsByStatus:
         ])
         p = tmp_path / "progress.md"
         p.write_text(content)
-        result = _get_runs_by_status(str(p), "pend")
+        result = get_runs_by_status(str(p), "pend")
         assert result == ["100"]
 
     def test_no_false_positive_across_statuses(self, tmp_path):
@@ -87,7 +85,7 @@ class TestGetRunsByStatus:
         ])
         p = tmp_path / "progress.md"
         p.write_text(content)
-        result = _get_runs_by_status(str(p), "done")
+        result = get_runs_by_status(str(p), "done")
         assert result == []
 
 
@@ -106,11 +104,10 @@ class TestMarkRunsAsError:
 
         mark_runs_as_error(str(p), ["100"])
 
-        text = p.read_text()
         # run 100 should be error
-        assert _get_runs_by_status(str(p), "error") == ["100"]
+        assert get_runs_by_status(str(p), "error") == ["100"]
         # run 200 should still be pending
-        assert _get_runs_by_status(str(p), "pending") == ["200"]
+        assert get_runs_by_status(str(p), "pending") == ["200"]
 
     def test_done_not_overwritten(self, tmp_path):
         content = make_progress_content([
@@ -122,7 +119,7 @@ class TestMarkRunsAsError:
         mark_runs_as_error(str(p), ["100"])
 
         # Should still be done since only pending -> error
-        assert _get_runs_by_status(str(p), "done") == ["100"]
+        assert get_runs_by_status(str(p), "done") == ["100"]
 
     def test_multiple_ids(self, tmp_path):
         content = make_progress_content([
@@ -135,8 +132,8 @@ class TestMarkRunsAsError:
 
         mark_runs_as_error(str(p), ["100", "300"])
 
-        assert sorted(_get_runs_by_status(str(p), "error")) == ["100", "300"]
-        assert _get_runs_by_status(str(p), "pending") == ["200"]
+        assert sorted(get_runs_by_status(str(p), "error")) == ["100", "300"]
+        assert get_runs_by_status(str(p), "pending") == ["200"]
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +163,7 @@ class TestSplitProgress:
         p = tmp_path / "progress.md"
         p.write_text(content)
 
-        result = split_progress(str(p), ["100"])
+        split_progress(str(p), ["100"])
 
         run_content = (tmp_path / "runs" / "run-100.md").read_text()
         assert "<!-- BEGIN RUN 100 -->" in run_content
@@ -221,7 +218,7 @@ class TestMergeRun:
 
         result = merge_run(str(p), "100", str(run_file))
         assert result is True
-        assert _get_runs_by_status(str(p), "done") == ["100"]
+        assert get_runs_by_status(str(p), "done") == ["100"]
 
     def test_run_not_in_progress_returns_false(self, tmp_path):
         content = make_progress_content([
@@ -258,7 +255,7 @@ class TestMergeRun:
 
 
 # ---------------------------------------------------------------------------
-# _is_run_done / _is_run_classified
+# is_run_done / is_run_classified
 # ---------------------------------------------------------------------------
 
 class TestIsRunDone:
@@ -268,7 +265,7 @@ class TestIsRunDone:
         ])
         p = tmp_path / "run-100.md"
         p.write_text(content)
-        assert _is_run_done(str(p), "100") is True
+        assert is_run_done(str(p), "100") is True
 
     def test_false_when_pending(self, tmp_path):
         content = make_progress_content([
@@ -276,7 +273,7 @@ class TestIsRunDone:
         ])
         p = tmp_path / "run-100.md"
         p.write_text(content)
-        assert _is_run_done(str(p), "100") is False
+        assert is_run_done(str(p), "100") is False
 
 
 class TestIsRunClassified:
@@ -286,7 +283,7 @@ class TestIsRunClassified:
         ])
         p = tmp_path / "run-100.md"
         p.write_text(content)
-        assert _is_run_classified(str(p), "100") is True
+        assert is_run_classified(str(p), "100") is True
 
     def test_false_when_not_classified(self, tmp_path):
         content = make_progress_content([
@@ -294,44 +291,27 @@ class TestIsRunClassified:
         ])
         p = tmp_path / "run-100.md"
         p.write_text(content)
-        assert _is_run_classified(str(p), "100") is False
+        assert is_run_classified(str(p), "100") is False
 
 
 # ---------------------------------------------------------------------------
-# _build_system_prompt
+# build_system_prompt
 # ---------------------------------------------------------------------------
 
 class TestBuildSystemPrompt:
     def test_without_context(self):
-        prompt = _build_system_prompt()
+        prompt = build_system_prompt()
         assert len(prompt) > 0
         assert "Repository-specific context" not in prompt
 
     def test_with_context(self):
-        prompt = _build_system_prompt("This repo uses Go 1.22")
+        prompt = build_system_prompt("This repo uses Go 1.22")
         assert "Repository-specific context" in prompt
         assert "This repo uses Go 1.22" in prompt
 
 
 # ---------------------------------------------------------------------------
-# _parse_field
-# ---------------------------------------------------------------------------
-
-class TestParseFieldClassify:
-    def test_basic(self):
-        text = "- **status**: done\n- **branch**: main"
-        assert _parse_field(text, "status") == "done"
-        assert _parse_field(text, "branch") == "main"
-
-    def test_missing(self):
-        assert _parse_field("- **status**: done", "branch") == ""
-
-    def test_empty_value(self):
-        assert _parse_field("- **category**:", "category") == ""
-
-
-# ---------------------------------------------------------------------------
-# _rebuild_categories_section
+# rebuild_categories_section
 # ---------------------------------------------------------------------------
 
 class TestRebuildCategoriesSection:
@@ -368,7 +348,7 @@ class TestRebuildCategoriesSection:
         p = tmp_path / "progress.md"
         p.write_text(content)
 
-        _rebuild_categories_section(str(p))
+        rebuild_categories_section(str(p))
 
         cats = self._read_cats(p)
         assert "test-flake/timeout" in cats
@@ -398,7 +378,7 @@ class TestRebuildCategoriesSection:
         p = tmp_path / "progress.md"
         p.write_text(content)
 
-        _rebuild_categories_section(str(p))
+        rebuild_categories_section(str(p))
 
         cats = self._read_cats(p)
         assert len(cats) == 2
@@ -429,7 +409,7 @@ class TestRebuildCategoriesSection:
         p = tmp_path / "progress.md"
         p.write_text(content)
 
-        _rebuild_categories_section(str(p))
+        rebuild_categories_section(str(p))
 
         cats = self._read_cats(p)
         assert "test-flake/timeout" in cats
@@ -450,7 +430,7 @@ class TestRebuildCategoriesSection:
         p = tmp_path / "progress.md"
         p.write_text(content)
 
-        _rebuild_categories_section(str(p))
+        rebuild_categories_section(str(p))
 
         cats = self._read_cats(p)
         assert "test-flake/race" in cats
@@ -479,7 +459,7 @@ class TestRebuildCategoriesSection:
         p = tmp_path / "progress.md"
         p.write_text(content)
 
-        _rebuild_categories_section(str(p))
+        rebuild_categories_section(str(p))
 
         cats = self._read_cats(p)
         assert len(cats) == 1
@@ -509,7 +489,7 @@ class TestRebuildCategoriesSection:
         p = tmp_path / "progress.md"
         p.write_text(content)
 
-        _rebuild_categories_section(str(p))
+        rebuild_categories_section(str(p))
 
         cats = self._read_cats(p)
         assert len(cats) == 2
@@ -527,7 +507,7 @@ class TestRebuildCategoriesSection:
         p = tmp_path / "progress.md"
         p.write_text(content)
 
-        _rebuild_categories_section(str(p))
+        rebuild_categories_section(str(p))
 
         text = p.read_text()
         assert "(none yet)" in text
@@ -552,7 +532,7 @@ class TestRebuildCategoriesSection:
         p = tmp_path / "progress.md"
         p.write_text(content)
 
-        _rebuild_categories_section(str(p))
+        rebuild_categories_section(str(p))
 
         cats = self._read_cats(p)
         assert "bug/wrong-category" not in cats
@@ -574,7 +554,7 @@ class TestRebuildCategoriesSection:
         p = tmp_path / "progress.md"
         p.write_text(content)
 
-        _rebuild_categories_section(str(p))
+        rebuild_categories_section(str(p))
 
         cats = self._read_cats(p)
         desc = cats["test-flake/timeout"]
@@ -592,7 +572,7 @@ class TestRebuildCategoriesSection:
         p = tmp_path / "progress.md"
         p.write_text(content)
 
-        _rebuild_categories_section(str(p))
+        rebuild_categories_section(str(p))
 
         text = p.read_text()
         assert "(none yet)" in text
@@ -612,7 +592,7 @@ class TestRebuildCategoriesSection:
         p = tmp_path / "progress.md"
         p.write_text(content)
 
-        _rebuild_categories_section(str(p))
+        rebuild_categories_section(str(p))
 
         text = p.read_text()
         pos_bug = text.index("bug/aa-first")

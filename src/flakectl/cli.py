@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from flakectl import __version__
 
@@ -24,7 +24,7 @@ def _write_no_failures_outputs(
 ) -> None:
     """Write summary/report files for a no-failures run."""
     summary = "No failed workflow runs found for the selected filters."
-    date_str = datetime.now(timezone.utc).date().isoformat()
+    date_str = datetime.now(UTC).date().isoformat()
 
     summary_path = os.path.join(output_dir, "summary.txt")
     with open(summary_path, "w") as f:
@@ -91,7 +91,10 @@ def _resolve_context(value: str) -> str:
 def cmd_classify(args):
     from flakectl.classify import run
     context = _resolve_context(args.context)
-    return run(args.repo, args.progress, context=context, model=args.model, stale_timeout_min=args.stale_timeout, max_turns=args.max_turns)
+    return run(
+        args.repo, args.progress, context=context, model=args.model,
+        stale_timeout_min=args.stale_timeout, max_turns=args.max_turns,
+    )
 
 
 def cmd_correlate(args):
@@ -112,11 +115,12 @@ def cmd_extract(args):
 
 def cmd_run(args):
     """Chain all steps: fetch -> progress -> classify -> correlate -> extract -> summarize."""
-    from flakectl.fetch import STATUS_NO_FAILURES, run as fetch_run
-    from flakectl.progress import run as progress_run
     from flakectl.classify import run as classify_run
     from flakectl.correlate import run as correlate_run
     from flakectl.extract import run as extract_run
+    from flakectl.fetch import STATUS_NO_FAILURES
+    from flakectl.fetch import run as fetch_run
+    from flakectl.progress import run as progress_run
 
     logger = logging.getLogger(__name__)
     base = args.output_dir
@@ -144,7 +148,11 @@ def cmd_run(args):
         return rc
 
     context = _resolve_context(args.context)
-    rc = classify_run(args.repo, progress_path, workdir=base, context=context, model=args.model, stale_timeout_min=args.stale_timeout, max_turns=args.max_turns_classify)
+    rc = classify_run(
+        args.repo, progress_path, workdir=base, context=context,
+        model=args.model, stale_timeout_min=args.stale_timeout,
+        max_turns=args.max_turns_classify,
+    )
     if rc != 0:
         return rc
 
@@ -313,7 +321,9 @@ def main():
 
     # --- run (full pipeline) ---
     p_run = subparsers.add_parser(
-        "run", help="Run the full pipeline: fetch -> progress -> classify -> correlate -> extract -> summarize",
+        "run",
+        help="Run the full pipeline: fetch -> progress -> classify"
+        " -> correlate -> extract -> summarize",
     )
     p_run.add_argument(
         "--repo", required=True,
@@ -366,7 +376,10 @@ def main():
     level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(
         level=level,
-        format="%(message)s" if level == logging.INFO else "%(asctime)s %(name)s %(levelname)s %(message)s",
+        format=(
+            "%(message)s" if level == logging.INFO
+            else "%(asctime)s %(name)s %(levelname)s %(message)s"
+        ),
         datefmt="%H:%M:%S",
         stream=sys.stderr,
     )

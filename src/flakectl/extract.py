@@ -11,7 +11,15 @@ import logging
 import os
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
+from flakectl.progressfile import (
+    RUN_BLOCK_RE,
+    VALID_CATEGORY_PREFIXES,
+    parse_categories_section,
+    parse_field,
+    parse_jobs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,49 +55,6 @@ def relative_date(date_str, ref_date):
         return "1 day ago"
     else:
         return f"{delta} days ago"
-
-
-def parse_field(text, field):
-    """Extract a field value from a section of text."""
-    match = re.search(rf"- \*\*{field}\*\*:\s*(.*)", text)
-    return match.group(1).strip() if match else ""
-
-
-def parse_categories_section(content):
-    """Extract category descriptions from the Categories So Far section."""
-    match = re.search(
-        r"<!-- CATEGORIES START -->(.*?)<!-- CATEGORIES END -->",
-        content, re.DOTALL,
-    )
-    if not match:
-        return {}
-    cats = {}
-    for line in match.group(1).strip().split("\n"):
-        m = re.match(r"- `([^`]+)`\s*--\s*(.*)", line.strip())
-        if m:
-            cats[m.group(1)] = m.group(2).strip()
-    return cats
-
-
-def parse_jobs(run_body):
-    """Parse individual job subsections from a run body."""
-    job_pattern = r"#### job: `([^`]+)`(.*?)(?=#### job:|$)"
-    matches = re.findall(job_pattern, run_body, re.DOTALL)
-
-    jobs = []
-    for job_name, job_body in matches:
-        jobs.append({
-            "job_name": job_name.strip(),
-            "step": parse_field(job_body, "step"),
-            "job_id": parse_field(job_body, "job_id"),
-            "category": parse_field(job_body, "category"),
-            "is_flake": parse_field(job_body, "is_flake"),
-            "test_id": parse_field(job_body, "test-id"),
-            "failed_test": parse_field(job_body, "failed_test"),
-            "error_message": parse_field(job_body, "error_message"),
-            "summary": parse_field(job_body, "summary"),
-        })
-    return jobs
 
 
 def _determine_flake_status(cat_rows: list[dict]) -> str:
@@ -166,10 +131,7 @@ def _format_fix_link(item: dict) -> str:
     PR:     [#123](url) or [#123](url) (possibly)
     Commit: [abc1234](url) or [abc1234](url) (possibly)
     """
-    if item.get("type") == "pr":
-        text = f"#{item['id']}"
-    else:
-        text = item["sha"][:7]
+    text = f"#{item['id']}" if item.get("type") == "pr" else item["sha"][:7]
     link = f"[{text}]({item['url']})"
     if item.get("confidence") == "possible":
         link += " (possibly)"
@@ -236,6 +198,150 @@ def _build_category_data(sorted_cats, cat_descriptions, analysis_date,
     return categories
 
 
+def _write_report_md(path, categories, total_runs, total_jobs,
+                     total_flake_runs, total_bug_runs, total_unclear_runs,
+                     unfinished, analysis_date):
+    """Write the markdown report file."""
+    with open(path, "w") as f:
+        f.write("# Flaky Test Analysis\n\n")
+        f.write(f"**Date:** {analysis_date.isoformat()}\n\n")
+        f.write(f"**{total_runs} failed runs** analyzed: "
+                f"**{total_flake_runs} caused by flakes**, "
+                f"**{total_bug_runs} caused by real failures**")
+        if total_unclear_runs:
+            f.write(f", **{total_unclear_runs} unclear**")
+        f.write(".\n\n")
+        f.write("Each category below maps to exactly **1 root cause / 1 fix**.\n\n")
+
+        f.write("## Summary\n\n")
+        f.write("| # | Category | Subcategory | Runs/Jobs | Flake? | Last Occurred | Fix |\n")
+        f.write("|---|----------|-------------|-----------|--------|---------------|-----|\n")
+
+        for i, cat_data in enumerate(categories, 1):
+            subcats_str = ", ".join(cat_data["subcategories"])
+            fix_str = ", ".join(
+                _format_fix_link(item) for item in cat_data.get("fixes", [])
+                if item.get("confidence") == "match"
+            )
+            f.write(
+                f"| {i} | `{cat_data['name']}` "
+                f"| {subcats_str} "
+                f"| {cat_data['run_count']}/{cat_data['job_count']} "
+                f"| {cat_data['flake']} | {cat_data['last_occurred']} "
+                f"| {fix_str} |\n"
+            )
+
+        f.write(
+            f"\n**Total: {total_runs} failed runs, "
+            f"{total_jobs} failed jobs**\n\n"
+        )
+
+        f.write("---\n\n")
+        f.write("## Root Causes (Detail)\n\n")
+
+        for i, cat_data in enumerate(categories, 1):
+            f.write(f"### {i}. `{cat_data['name']}`\n\n")
+
+            if cat_data["description"]:
+                f.write(f"**Description:** {cat_data['description']}\n\n")
+
+            f.write(f"- **Failed runs:** {cat_data['run_count']}\n")
+            f.write(f"- **Failed jobs:** {cat_data['job_count']}\n")
+            if cat_data["test_ids"]:
+                f.write(f"- **Test IDs:** {', '.join(cat_data['test_ids'])}\n")
+
+            if cat_data.get("fixes"):
+                fix_links = ", ".join(
+                    _format_fix_link(item) for item in cat_data["fixes"]
+                )
+                f.write(f"- **Fix:** {fix_links}\n")
+
+            error = cat_data["example_error"]
+            if error:
+                if len(error) > 200:
+                    error = error[:200] + "..."
+                f.write(f"- **Example error:** `{error}`\n")
+
+            summary = cat_data["example_summary"]
+            if summary:
+                if len(summary) > 600:
+                    summary = summary[:600] + "..."
+                f.write(f"- **Example summary:** {summary}\n")
+
+            f.write("\n")
+
+            f.write("| Run ID | Branch | Date | Jobs Failed |\n")
+            f.write("|--------|--------|------|-------------|\n")
+            for affected_run in cat_data["affected_runs"]:
+                branch = affected_run["branch"]
+                if len(branch) > 40:
+                    branch = branch[:37] + "..."
+                f.write(
+                    f"| [{affected_run['run_id']}]({affected_run['run_url']}) | {branch} "
+                    f"| {affected_run['date']} | {affected_run['jobs_failed']} |\n"
+                )
+            f.write("\n")
+
+        if unfinished:
+            f.write("---\n\n")
+            f.write("## Unfinished Runs\n\n")
+            f.write("| Run ID | Status |\n")
+            f.write("|--------|--------|\n")
+            for r in unfinished:
+                f.write(f"| [{r['run_id']}]({r['run_url']}) | {r['status']} |\n")
+
+    logger.info("Wrote %s", path)
+
+
+def _write_report_json(path, categories, total_runs, total_jobs,
+                       total_flake_runs, total_bug_runs, total_unclear_runs,
+                       unfinished, analysis_date):
+    """Write the JSON report file."""
+    json_categories = []
+    for cat_data in categories:
+        json_cat = {
+            "name": cat_data["name"],
+            "description": cat_data["description"],
+            "is_flake": cat_data["flake"],
+            "runs": cat_data["run_count"],
+            "jobs": cat_data["job_count"],
+            "test_ids": cat_data["test_ids"],
+            "subcategories": cat_data["subcategories"],
+            "example_error": cat_data["example_error"],
+            "example_summary": cat_data["example_summary"],
+            "affected_runs": cat_data["affected_runs"],
+        }
+        if cat_data.get("fixes"):
+            json_cat["fixes"] = [
+                {
+                    "type": item.get("type"),
+                    "id": item.get("id"),
+                    "sha": item.get("sha"),
+                    "url": item.get("url"),
+                    "title": item.get("title", ""),
+                    "confidence": item.get("confidence"),
+                }
+                for item in cat_data["fixes"]
+            ]
+        json_categories.append(json_cat)
+
+    report_json = {
+        "date": analysis_date.isoformat(),
+        "total_runs": total_runs,
+        "flake_runs": total_flake_runs,
+        "real_failure_runs": total_bug_runs,
+        "unclear_runs": total_unclear_runs,
+        "total_jobs": total_jobs,
+        "categories": json_categories,
+        "unfinished_runs": unfinished,
+    }
+
+    with open(path, "w") as f:
+        json.dump(report_json, f, indent=2)
+
+    logger.info("Wrote %s", path)
+
+
 def run(
     input_path: str = "progress.md",
     output_md: str = "report.md",
@@ -255,8 +361,7 @@ def run(
             fixes_path = auto_path
     fixes_by_cat = _load_fixes(fixes_path)
 
-    pattern = r"<!-- BEGIN RUN (\d+) -->(.*?)<!-- END RUN \1 -->"
-    sections = re.findall(pattern, content, re.DOTALL)
+    sections = re.findall(RUN_BLOCK_RE, content, re.DOTALL)
 
     if not sections:
         logger.warning("No run sections found in progress.md")
@@ -311,12 +416,10 @@ def run(
     # ---- Build report data ----
     classified = [r for r in results if r["status"] == "done"]
 
-    _VALID_PREFIXES = ("test-flake/", "infra-flake/", "bug/", "build-error/")
-
     by_cat = defaultdict(list)
     for r in classified:
         cat = r["category"]
-        if cat and cat.startswith(_VALID_PREFIXES):
+        if cat and cat.startswith(VALID_CATEGORY_PREFIXES):
             category, _ = _split_category(cat)
             by_cat[category].append(r)
 
@@ -329,155 +432,27 @@ def run(
     total_runs = len(set(r["run_id"] for r in classified))
     total_flake_runs, total_bug_runs, total_unclear_runs = _summarize_runs(classified)
 
-    analysis_date = datetime.now(timezone.utc).date()
+    analysis_date = datetime.now(UTC).date()
 
     categories = _build_category_data(
         sorted_cats, cat_descriptions, analysis_date,
         fixes_by_cat=fixes_by_cat,
     )
 
-    # ---- Write report.md ----
-    with open(output_md, "w") as f:
-        f.write("# Flaky Test Analysis\n\n")
-        f.write(f"**Date:** {analysis_date.isoformat()}\n\n")
-        f.write(f"**{total_runs} failed runs** analyzed: "
-                f"**{total_flake_runs} caused by flakes**, "
-                f"**{total_bug_runs} caused by real failures**")
-        if total_unclear_runs:
-            f.write(f", **{total_unclear_runs} unclear**")
-        f.write(".\n\n")
-        f.write("Each category below maps to exactly **1 root cause / 1 fix**.\n\n")
-
-        f.write("## Summary\n\n")
-        f.write("| # | Category | Subcategory | Runs/Jobs | Flake? | Last Occurred | Fix |\n")
-        f.write("|---|----------|-------------|-----------|--------|---------------|-----|\n")
-
-        for i, cat_data in enumerate(categories, 1):
-            subcats_str = ", ".join(cat_data["subcategories"])
-            fix_str = ", ".join(
-                _format_fix_link(item) for item in cat_data.get("fixes", [])
-                if item.get("confidence") == "match"
-            )
-            f.write(
-                f"| {i} | `{cat_data['name']}` "
-                f"| {subcats_str} "
-                f"| {cat_data['run_count']}/{cat_data['job_count']} "
-                f"| {cat_data['flake']} | {cat_data['last_occurred']} "
-                f"| {fix_str} |\n"
-            )
-
-        f.write(
-            f"\n**Total: {total_runs} failed runs, "
-            f"{len(classified)} failed jobs**\n\n"
-        )
-
-        f.write("---\n\n")
-        f.write("## Root Causes (Detail)\n\n")
-
-        for i, cat_data in enumerate(categories, 1):
-            f.write(f"### {i}. `{cat_data['name']}`\n\n")
-
-            if cat_data["description"]:
-                f.write(f"**Description:** {cat_data['description']}\n\n")
-
-            f.write(f"- **Failed runs:** {cat_data['run_count']}\n")
-            f.write(f"- **Failed jobs:** {cat_data['job_count']}\n")
-            if cat_data["test_ids"]:
-                f.write(f"- **Test IDs:** {', '.join(cat_data['test_ids'])}\n")
-
-            if cat_data.get("fixes"):
-                fix_links = ", ".join(
-                    _format_fix_link(item) for item in cat_data["fixes"]
-                )
-                f.write(f"- **Fix:** {fix_links}\n")
-
-            error = cat_data["example_error"]
-            if error:
-                if len(error) > 200:
-                    error = error[:200] + "..."
-                f.write(f"- **Example error:** `{error}`\n")
-
-            summary = cat_data["example_summary"]
-            if summary:
-                if len(summary) > 600:
-                    summary = summary[:600] + "..."
-                f.write(f"- **Example summary:** {summary}\n")
-
-            f.write("\n")
-
-            f.write("| Run ID | Branch | Date | Jobs Failed |\n")
-            f.write("|--------|--------|------|-------------|\n")
-            for affected_run in cat_data["affected_runs"]:
-                branch = affected_run["branch"]
-                if len(branch) > 40:
-                    branch = branch[:37] + "..."
-                f.write(
-                    f"| [{affected_run['run_id']}]({affected_run['run_url']}) | {branch} "
-                    f"| {affected_run['date']} | {affected_run['jobs_failed']} |\n"
-                )
-            f.write("\n")
-
-        if pending or errored:
-            f.write("---\n\n")
-            f.write("## Unfinished Runs\n\n")
-            f.write("| Run ID | Status |\n")
-            f.write("|--------|--------|\n")
-            for r in pending + errored:
-                f.write(f"| [{r['run_id']}]({r['run_url']}) | {r['status']} |\n")
-
-    logger.info("Wrote %s", output_md)
-
-    # ---- Write report.json ----
-    json_categories = []
-    for cat_data in categories:
-        json_cat = {
-            "name": cat_data["name"],
-            "description": cat_data["description"],
-            "is_flake": cat_data["flake"],
-            "runs": cat_data["run_count"],
-            "jobs": cat_data["job_count"],
-            "test_ids": cat_data["test_ids"],
-            "subcategories": cat_data["subcategories"],
-            "example_error": cat_data["example_error"],
-            "example_summary": cat_data["example_summary"],
-            "affected_runs": cat_data["affected_runs"],
-        }
-        if cat_data.get("fixes"):
-            json_cat["fixes"] = [
-                {
-                    "type": item.get("type"),
-                    "id": item.get("id"),
-                    "sha": item.get("sha"),
-                    "url": item.get("url"),
-                    "title": item.get("title", ""),
-                    "confidence": item.get("confidence"),
-                }
-                for item in cat_data["fixes"]
-            ]
-        json_categories.append(json_cat)
-
+    total_jobs = len(classified)
     unfinished = [
         {"run_id": r["run_id"], "status": r["status"], "run_url": r["run_url"]}
         for r in pending + errored
     ]
 
-    report_json = {
-        "date": analysis_date.isoformat(),
-        "total_runs": total_runs,
-        "flake_runs": total_flake_runs,
-        "real_failure_runs": total_bug_runs,
-        "unclear_runs": total_unclear_runs,
-        "total_jobs": len(classified),
-        "categories": json_categories,
-        "unfinished_runs": unfinished,
-    }
+    _write_report_md(output_md, categories, total_runs, total_jobs,
+                     total_flake_runs, total_bug_runs, total_unclear_runs,
+                     unfinished, analysis_date)
+    _write_report_json(output_json, categories, total_runs, total_jobs,
+                       total_flake_runs, total_bug_runs, total_unclear_runs,
+                       unfinished, analysis_date)
 
-    with open(output_json, "w") as f:
-        json.dump(report_json, f, indent=2)
-
-    logger.info("Wrote %s", output_json)
-
-    # Print summary
+    # Log summary
     logger.info("")
     logger.info("=== Flaky Test Analysis Summary ===")
     logger.info("")

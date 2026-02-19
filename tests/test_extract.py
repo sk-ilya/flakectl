@@ -3,9 +3,8 @@
 import json
 from datetime import date
 
-import pytest
-
 from conftest import make_progress_content
+
 from flakectl.extract import (
     _build_category_data,
     _determine_flake_status,
@@ -14,13 +13,10 @@ from flakectl.extract import (
     _lookup_description,
     _split_category,
     _summarize_runs,
-    parse_categories_section,
-    parse_field,
-    parse_jobs,
     relative_date,
     run,
 )
-
+from flakectl.progressfile import parse_categories_section, parse_field, parse_jobs
 
 # ---------------------------------------------------------------------------
 # relative_date
@@ -822,7 +818,8 @@ class TestFormatFixLink:
         item = {"type": "commit", "sha": "1234567890abcdef",
                 "url": "https://example.com/commit/1234567890abcdef",
                 "confidence": "possible"}
-        assert _format_fix_link(item) == "[1234567](https://example.com/commit/1234567890abcdef) (possibly)"
+        expected = "[1234567](https://example.com/commit/1234567890abcdef) (possibly)"
+        assert _format_fix_link(item) == expected
 
 
 # ---------------------------------------------------------------------------
