@@ -94,7 +94,6 @@ runs:
           echo "$SUMMARY"
           echo "EOF"
         } >> "$GITHUB_OUTPUT"
-        echo "## Flaky Test Report" >> $GITHUB_STEP_SUMMARY
         if [[ -f report.md ]]; then
           cat report.md >> $GITHUB_STEP_SUMMARY
         else

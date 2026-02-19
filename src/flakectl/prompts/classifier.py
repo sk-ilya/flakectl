@@ -16,7 +16,7 @@ Then identify the root cause so the flake can be fixed.
 ## Progress.md Format
 
 Each run has a header with run-level info, then one `#### job:` subsection PER failed job.
-Each job subsection has its own fields (category, is_flake, test_id, etc.).
+Each job subsection has its own fields (category, is_flake, test-id, etc.).
 You must analyze EACH job separately -- they may have different root causes.
 
 ## Analyze EACH job -- flake or real failure?
@@ -36,15 +36,23 @@ For each failed job, determine:
 ## Failure types and category format
 
 ```
-test-flake/<test_id>-<root-cause>          -- flaky test (timing, race, fragile assertion)
+test-flake/<root-cause>/<test-id>           -- flaky test (timing, race, fragile assertion)
 test-flake/systemic-<root-cause>           -- systemic flake: environment broken, ALL tests fail
 infra-flake/<root-cause>                   -- CI environment / network issue, not test code
-bug/<test_id>-<description>                -- real bug caught by test (not a flake)
+bug/<description>/<test-id>                 -- real bug caught by test (not a flake)
 build-error/<description>                  -- code doesn't compile (not a flake)
 ```
 
-Categories MUST include a test identifier when applicable (see "Extracting test
-identifiers" below for framework-specific formats).
+A full category has 2 or 3 `/`-separated segments:
+- First two segments = the **category** (type + root cause).
+- Optional third segment = **subcategory** (identifies what specifically
+  failed -- usually a test identifier, but could be a module, service, or
+  other scoping identifier).
+The root-cause segment must NOT contain the subcategory identifier.
+
+When you can identify the specific test or component that failed, add it as
+the subcategory (third segment). See "Extracting test identifiers" below
+for framework-specific formats.
 
 ## Extracting test identifiers
 
@@ -61,26 +69,33 @@ specific identifier available:
 | RSpec | Example description in failure output | `User#valid? returns false for empty email` |
 | Other | Use the most specific test name visible in the logs | The full test name or function |
 
-For category names, use a short slug derived from the identifier:
-- Ginkgo: `test-flake/78753-hooks-lifecycle-timeout`
-- Go: `test-flake/TestReconcileDevice-context-cancelled`
-- pytest: `test-flake/test_expired_token-session-race`
-- JUnit: `test-flake/testCreateUser-db-connection-timeout`
-- Jest: `test-flake/rejects-expired-tokens-timing`
+For the category field, the root cause is the second segment and the
+subcategory (test ID or other identifier) is the third:
+- Ginkgo: `test-flake/hooks-lifecycle-timeout/78753`
+- Go: `test-flake/context-cancelled/TestReconcileDevice`
+- pytest: `test-flake/session-race/test_expired_token`
+- JUnit: `test-flake/db-connection-timeout/testCreateUser`
+- Jest: `test-flake/timing/rejects-expired-tokens`
 
 ## Category examples
 
-Good (specific root cause, includes test ID):
-- `test-flake/78753-status-update-timeout` -- test 78753: resource status not updated within timeout
-- `test-flake/TestReconcile-context-deadline-exceeded` -- reconcile loop times out under load
-- `test-flake/systemic-all-pods-crashloop` -- ALL tests fail because pods crash on startup
-- `test-flake/test_expired_token-session-race` -- race between session refresh and token validation
-- `bug/TestParseConfig-nil-pointer` -- nil map access when config section is missing (real defect)
-- `bug/test_calculate_total-off-by-one` -- discount applied twice (real defect)
-- `bug/testParseResponse-npe-on-null-body` -- NullPointerException when response body is null (real defect)
-- `infra-flake/image-pull-backoff-all-pods` -- all pods enter ImagePullBackOff during deploy
+Good (specific root cause, test ID as subcategory):
+- `test-flake/status-update-timeout/78753` -- resource status not updated within timeout
+- `test-flake/context-deadline-exceeded/TestReconcile` -- reconcile loop times out under load
+- `test-flake/systemic-all-pods-crashloop` -- ALL tests fail because pods crash on startup (no subcategory)
+- `test-flake/session-race/test_expired_token` -- race between session refresh and token validation
+- `bug/nil-pointer/TestParseConfig` -- nil map access when config section is missing (real defect)
+- `bug/off-by-one/test_calculate_total` -- discount applied twice (real defect)
+- `bug/npe-on-null-body/testParseResponse` -- NullPointerException when response body is null (real defect)
+- `infra-flake/image-pull-backoff-all-pods` -- all pods enter ImagePullBackOff during deploy (no subcategory)
 - `infra-flake/docker-daemon-not-responding` -- Docker daemon unresponsive during container setup
 - `build-error/undefined-symbol` -- code references undefined symbol, build fails
+
+When two tests fail for the SAME root cause, they share the same category
+and differ only in subcategory:
+- `test-flake/renderedversion-update-failure/78753`
+- `test-flake/renderedversion-update-failure/78684`
+Both hit the same update timeout -- one fix resolves both.
 
 Bad (too vague, no test ID, lumps different root causes):
 - `test-flake/timeout` -- which test? what timed out?
@@ -89,14 +104,15 @@ Bad (too vague, no test ID, lumps different root causes):
 ## Distinguishing root causes
 
 Two failures belong to the SAME category only if they have the SAME root cause
-and would be fixed by the SAME code change. The key is comparing the actual
-error messages and log patterns, not the category slug wording.
+and would be fixed by the SAME code change -- even if triggered by different
+tests. The key is understanding the actual root cause, not superficially
+matching error messages or category slug wording.
 
-1. **Same test, same or different failure mode?** Compare the `error_message`
-   fields. If the error messages share the same structure (differing only in
-   device IDs, version numbers, or timestamps), they are the SAME root cause
-   and MUST use the same category. Only assign different categories to the
-   same test_id if the failure mechanism is genuinely different -- for example:
+1. **Same or different failure mode?** Compare error messages AND understand the
+   underlying cause. If the errors share the same structure (differing only in
+   run-specific values like IDs or timestamps), they are likely the SAME root
+   cause and MUST use the same category -- even across different tests. Only
+   assign different categories if the failure mechanism is genuinely different:
    - A network connectivity error vs a logic assertion error
    - A nil-pointer crash vs a timeout waiting for a resource
    - An authentication failure vs a data validation failure
@@ -108,10 +124,10 @@ error messages and log patterns, not the category slug wording.
    - If only ONE job fails while others pass, that's an isolated flake
      tied to that specific test.
 
-3. **Same error message, different test** = check if root cause is shared:
-   - A timeout error in two different tests might have different root causes.
-     One might be a scheduling issue, the other a resource contention issue.
-     Read the full context to determine if the underlying cause is the same.
+3. **Same error, different test** = may share root cause. Read summaries from
+   other agents and, when ambiguous, check test or source files to understand
+   the actual cause. If the same fix resolves both, use the same category with
+   different subcategories.
 
 4. **Infra vs test flake**:
    - If the test never got to run (image pull failure, VM didn't boot,
@@ -121,38 +137,36 @@ error messages and log patterns, not the category slug wording.
 
 ## Before creating a NEW category
 
-Before inventing a new category slug, you MUST check whether an existing one
-already covers the same root cause:
+Before inventing a new category, check whether an existing one already covers
+the same root cause:
 
 1. Search progress.md (both "Categories So Far" and completed runs) for any
-   category that shares the same test_id as your failure.
-2. For each match, read the `error_message` and `summary` fields from a
-   completed run that used that category.
-3. Compare root causes: do the error messages describe the same structural
-   failure? (Differences in device IDs, version numbers, or timestamps do
-   NOT make it a different root cause.)
-4. If the root cause matches, reuse that category. If multiple categories
-   match (same test_id, same root cause), pick the **oldest** one -- the
-   category from the run with the earliest `run_started_at`.
-5. Only create a new category if:
-   - No existing category shares the test_id, OR
-   - The error messages reveal a genuinely different failure mechanism
-6. When creating a new category, prefer generic slugs over over-specific
-   ones. For example, prefer `test-flake/78753-renderedversion-update-failure`
-   over `test-flake/78753-renderedversion-not-updated-after-reboot`.
+   category whose root cause might match your failure.
+2. For each candidate, read the `summary` and `error_message` fields from
+   completed runs that used it. The summary describes the root cause as
+   understood by the classifying agent.
+3. Determine whether the root cause is truly the same: would the same fix
+   resolve both failures? Similar error messages can have different root
+   causes. When in doubt, investigate deeper -- read relevant test or source
+   files to understand the actual root cause before deciding.
+4. If the root cause matches, reuse that category and set the appropriate
+   identifier (test ID, module, etc.) as the subcategory. If multiple categories match, pick the **oldest** one
+   (earliest `run_started_at`).
+5. Only create a new category if no existing one has the same root cause.
+   Prefer generic root-cause names.
 
 ## Fields to fill in
 
 For each `#### job:` subsection, determine:
 
-1. **category**: Root-cause category (see format and rules above)
+1. **category**: Full category path including subcategory (see format above)
 
 2. **is_flake**: yes / no / unclear
    - yes = intermittent failure (test flake or infra flake)
    - no = real bug or build error
    - unclear = can't determine from logs alone
 
-3. **test_id**: Test identifier extracted from the logs (see "Extracting test
+3. **test-id**: Test identifier extracted from the logs (see "Extracting test
    identifiers" above). Use the framework-appropriate format. Comma-separated
    if multiple tests failed. Empty for non-test failures (infra, build).
 
@@ -217,7 +231,7 @@ Different frameworks format failure output differently. Look for these patterns:
 - Save a SEPARATE log file per job: files/{run_id}_{job_id}.log
 - The key question is: FLAKE or REAL FAILURE?
 - Category = root cause = one fix
-- Always include test identifier in category name for test failures
+- The subcategory (third segment) identifies what specifically failed
 - Before creating a new category, check if an existing one covers the same
   root cause (see "Before creating a NEW category" above)
 - When reusing a category, pick the oldest one (earliest run_started_at)
@@ -303,10 +317,9 @@ re-read progress.md before creating a new category and again after you finish.
 
 1. Read `progress.md` for context: check the "Categories So Far" section and
    any already-completed runs to see existing classifications.
-1b. **Pre-check existing categories.** Note all existing categories grouped
-   by test_id. For each test_id you will encounter, you should search for
-   matching root causes in these existing categories before creating any
-   new category. Keep this list in mind throughout your analysis.
+1b. **Pre-check existing categories.** Note all existing categories. For
+   each root cause you encounter, check whether any existing category
+   describes the same failure before creating a new one.
 2. Fetch failed job IDs using the `get_jobs` tool with `repo` and `run_id` parameters.
    It returns tab-separated lines of `job_id\tjob_name`.
 3. For each failed job, download its log using the `download_log` tool with `repo`,
@@ -316,13 +329,14 @@ re-read progress.md before creating a new category and again after you finish.
 5. Analyze: is this a flake or real failure?
 6. Before reusing an existing category, verify the root cause matches:
    - Find a completed run in progress.md that uses this category.
-   - Compare its `error_message` and `summary` fields to your failure's.
-   - If the error messages share the same structure, the root cause matches.
-   - For deeper verification, you can read the prior run's log file using
-     Read or Grep (path format: `files/{run_id}_{job_id}.log`, where both
-     values come from progress.md). Do NOT use Bash or shell commands to find files.
+   - Read its `summary` and `error_message` fields. The summary describes
+     the root cause as understood by the classifying agent.
+   - If the same fix would resolve both failures, the root cause matches.
+   - When in doubt, read the prior run's log file or check test/source
+     files for deeper verification (log path format:
+     `files/{run_id}_{job_id}.log`).
 7. Update your progress file (given in the task description) via Edit:
-   - Fill all job fields (category, is_flake, test_id, failed_test,
+   - Fill all job fields (category, is_flake, test-id, failed_test,
      error_message, summary)
    - Set run status to `classified`
    - Do NOT edit progress.md directly -- only edit your assigned file

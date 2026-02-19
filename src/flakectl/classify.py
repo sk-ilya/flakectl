@@ -153,10 +153,11 @@ Your results have been merged into progress.md. Other agents have also
 merged their results while you were working.
 
 Re-read progress.md now and check all categories across all completed runs.
-If any existing category describes the same root cause as yours (same
-structural error pattern, same failure mechanism), update your per-run file
-to use that category instead. Pick the one used by the most runs; break
-ties by earliest run_started_at. Do NOT edit progress.md directly.
+Compare by category (the first two path segments). If another agent used
+a different category for the same root cause (same fix), update your
+per-run file to use that category instead (keeping your own subcategory).
+Pick the category used by the most runs; break ties by earliest
+run_started_at. Do NOT edit progress.md directly.
 
 Then set your run status to "done" (replace "classified" with "done").
 

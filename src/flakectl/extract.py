@@ -15,6 +15,19 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 
+def _split_category(cat: str) -> tuple[str, str]:
+    """Split a full category into (category, subcategory).
+
+    When there are 3+ segments, the last one is the subcategory.
+    'test-flake/timeout/78753' -> ('test-flake/timeout', '78753')
+    'infra-flake/registry-502' -> ('infra-flake/registry-502', '')
+    """
+    parts = cat.split("/")
+    if len(parts) >= 3:
+        return "/".join(parts[:-1]), parts[-1]
+    return cat, ""
+
+
 def relative_date(date_str, ref_date):
     """Return a human-friendly relative date string."""
     if not date_str:
@@ -70,7 +83,7 @@ def parse_jobs(run_body):
             "job_id": parse_field(job_body, "job_id"),
             "category": parse_field(job_body, "category"),
             "is_flake": parse_field(job_body, "is_flake"),
-            "test_id": parse_field(job_body, "test_id"),
+            "test_id": parse_field(job_body, "test-id"),
             "failed_test": parse_field(job_body, "failed_test"),
             "error_message": parse_field(job_body, "error_message"),
             "summary": parse_field(job_body, "summary"),
@@ -112,6 +125,20 @@ def _summarize_runs(classified_rows: list[dict]) -> tuple[int, int, int]:
     return flake_runs, real_failure_runs, unclear_runs
 
 
+def _lookup_description(category: str, cat_descriptions: dict[str, str]) -> str:
+    """Look up a description for a category.
+
+    Tries exact match first, then matches any full category whose first two
+    segments equal the given category.
+    """
+    if category in cat_descriptions:
+        return cat_descriptions[category]
+    for full_cat, desc in cat_descriptions.items():
+        if _split_category(full_cat)[0] == category:
+            return desc
+    return ""
+
+
 def _build_category_data(sorted_cats, cat_descriptions, analysis_date):
     """Build a list of category summary dicts from sorted categories."""
     categories = []
@@ -121,7 +148,7 @@ def _build_category_data(sorted_cats, cat_descriptions, analysis_date):
             tid.strip()
             for r in cat_rows
             for tid in r["test_id"].split(",")
-            # Guard: agents occasionally include markdown field markers in test_id
+            # Guard: agents occasionally include markdown field markers in test-id
             if tid.strip() and not tid.strip().startswith("- **")
         ))
         flake = _determine_flake_status(cat_rows)
@@ -148,13 +175,20 @@ def _build_category_data(sorted_cats, cat_descriptions, analysis_date):
                 "jobs_failed": len(run_rows),
             })
 
+        subcats = sorted(set(
+            _split_category(r["category"])[1]
+            for r in cat_rows
+            if _split_category(r["category"])[1]
+        ))
+
         categories.append({
             "name": cat,
-            "description": cat_descriptions.get(cat, ""),
+            "description": _lookup_description(cat, cat_descriptions),
             "flake": flake,
             "run_count": len(unique_run_ids),
             "job_count": len(cat_rows),
             "test_ids": test_ids,
+            "subcategories": subcats,
             "example_error": example_error,
             "example_summary": example_summary,
             "last_occurred": last_rel,
@@ -236,7 +270,8 @@ def run(
     for r in classified:
         cat = r["category"]
         if cat and cat.startswith(_VALID_PREFIXES):
-            by_cat[cat].append(r)
+            category, _ = _split_category(cat)
+            by_cat[category].append(r)
 
     sorted_cats = sorted(
         by_cat.items(),
@@ -264,12 +299,14 @@ def run(
         f.write("Each category below maps to exactly **1 root cause / 1 fix**.\n\n")
 
         f.write("## Summary\n\n")
-        f.write("| # | Category | Runs/Jobs | Flake? | Last Occurred |\n")
-        f.write("|---|----------|-----------|--------|---------------|\n")
+        f.write("| # | Category | Subcategory | Runs/Jobs | Flake? | Last Occurred |\n")
+        f.write("|---|----------|-------------|-----------|--------|---------------|\n")
 
         for i, cat_data in enumerate(categories, 1):
+            subcats_str = ", ".join(cat_data["subcategories"])
             f.write(
                 f"| {i} | `{cat_data['name']}` "
+                f"| {subcats_str} "
                 f"| {cat_data['run_count']}/{cat_data['job_count']} "
                 f"| {cat_data['flake']} | {cat_data['last_occurred']} |\n"
             )
@@ -339,6 +376,7 @@ def run(
             "runs": cat_data["run_count"],
             "jobs": cat_data["job_count"],
             "test_ids": cat_data["test_ids"],
+            "subcategories": cat_data["subcategories"],
             "example_error": cat_data["example_error"],
             "example_summary": cat_data["example_summary"],
             "affected_runs": cat_data["affected_runs"],
