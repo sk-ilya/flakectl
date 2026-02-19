@@ -214,7 +214,7 @@ Different frameworks format failure output differently. Look for these patterns:
 ## Important Rules
 
 - Analyze EACH job within the run SEPARATELY
-- Save a SEPARATE log file per job: {run_id}_{job_id}.log
+- Save a SEPARATE log file per job: files/{run_id}_{job_id}.log
 - The key question is: FLAKE or REAL FAILURE?
 - Category = root cause = one fix
 - Always include test identifier in category name for test failures
@@ -272,10 +272,11 @@ source code to produce a more accurate classification.
 **Available tools (all read-only):**
 - `get_commit(repo, sha)` -- view commit message, author, changed files with
   stats. The commit SHA is in progress.md as `commit_sha`.
-- `get_file(repo, path, ref, output)` -- download a file at a specific commit
-  SHA to disk. Use the `commit_sha` from progress.md as the `ref` parameter.
-  The file is saved to `output` -- use Grep/Read with head_limit/offset/limit
-  to navigate it (same as with log files).
+- `get_file(repo, path, ref)` -- download a file at a specific commit SHA
+  to disk. Use the `commit_sha` from progress.md as the `ref` parameter.
+  The file is saved to `files/{ref_prefix}/{repo_path}` -- the response
+  includes the local path. Use Grep/Read with head_limit/offset/limit to
+  navigate it (same as with log files).
 - `list_repo_dir(repo, path, ref)` -- list directory contents at a commit SHA.
   Use with an empty `path` to list the repo root.
 
@@ -310,6 +311,7 @@ re-read progress.md before creating a new category and again after you finish.
    It returns tab-separated lines of `job_id\tjob_name`.
 3. For each failed job, download its log using the `download_log` tool with `repo`,
    `job_id`, and `output` (set to `{RUN_ID}_{JOB_ID}.log`) parameters.
+   The log is saved to `files/{RUN_ID}_{JOB_ID}.log`.
 4. Search the downloaded log using Grep (see "Searching log files" above).
 5. Analyze: is this a flake or real failure?
 6. Before reusing an existing category, verify the root cause matches:
@@ -317,8 +319,8 @@ re-read progress.md before creating a new category and again after you finish.
    - Compare its `error_message` and `summary` fields to your failure's.
    - If the error messages share the same structure, the root cause matches.
    - For deeper verification, you can read the prior run's log file using
-     Read or Grep (path format: `{run_id}_{job_id}.log`, where both values
-     come from progress.md). Do NOT use Bash or shell commands to find files.
+     Read or Grep (path format: `files/{run_id}_{job_id}.log`, where both
+     values come from progress.md). Do NOT use Bash or shell commands to find files.
 7. Update your progress file (given in the task description) via Edit:
    - Fill all job fields (category, is_flake, test_id, failed_test,
      error_message, summary)
