@@ -90,8 +90,8 @@ runs:
         else
           echo "status=ok" >> "$GITHUB_OUTPUT"
         fi
-        echo "report=$PWD/report.md" >> $GITHUB_OUTPUT
-        echo "results=$PWD/report.json" >> $GITHUB_OUTPUT
+        echo "report=$PWD/report.md" >> "$GITHUB_OUTPUT"
+        echo "results=$PWD/report.json" >> "$GITHUB_OUTPUT"
         SUMMARY=$(cat summary.txt 2>/dev/null || echo "Analysis completed. See report.md for details.")
         {
           echo "summary<<EOF"
