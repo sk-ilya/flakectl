@@ -100,7 +100,7 @@ Tips:
 - Use case-insensitive grep for natural-language terms
 - GitHub search tokenizes on word boundaries, so camelCase identifiers
   may not match commit messages written in natural language -- try both
-  forms (e.g. grep for both `renderedVersion` and `rendered version`)
+  forms (e.g. grep for both `connectionPool` and `connection pool`)
 
 ### Step 3: Inspect promising candidates
 

@@ -61,8 +61,8 @@ specific identifier available:
 
 | Framework | Where to find the ID | Example ID |
 |-----------|---------------------|------------|
-| Ginkgo (Go) | Label brackets in test output | `78753` from `[78753, sanity, agent, slow]` |
-| Go testing | Function name in `--- FAIL:` line | `TestReconcileDevice` from `--- FAIL: TestReconcileDevice (0.53s)` |
+| Ginkgo (Go) | Label brackets in test output | `12345` from `[12345, sanity, integration, slow]` |
+| Go testing | Function name in `--- FAIL:` line | `TestCreateOrder` from `--- FAIL: TestCreateOrder (0.53s)` |
 | pytest | Node ID in failure header | `test_auth.py::TestLogin::test_expired_token` from `FAILED test_auth.py::TestLogin::test_expired_token` |
 | JUnit | Class#method in test report | `UserServiceTest#testCreateUser` from `Tests run: 1, Failures: 1 ... UserServiceTest#testCreateUser` |
 | Jest | Describe/it path in failure output | `AuthModule > login > rejects expired tokens` |
@@ -71,8 +71,8 @@ specific identifier available:
 
 For the category field, the root cause is the second segment and the
 subcategory (test ID or other identifier) is the third:
-- Ginkgo: `test-flake/hooks-lifecycle-timeout/78753`
-- Go: `test-flake/context-cancelled/TestReconcileDevice`
+- Ginkgo: `test-flake/hooks-lifecycle-timeout/12345`
+- Go: `test-flake/context-cancelled/TestCreateOrder`
 - pytest: `test-flake/session-race/test_expired_token`
 - JUnit: `test-flake/db-connection-timeout/testCreateUser`
 - Jest: `test-flake/timing/rejects-expired-tokens`
@@ -80,8 +80,8 @@ subcategory (test ID or other identifier) is the third:
 ## Category examples
 
 Good (specific root cause, test ID as subcategory):
-- `test-flake/status-update-timeout/78753` -- resource status not updated within timeout
-- `test-flake/context-deadline-exceeded/TestReconcile` -- reconcile loop times out under load
+- `test-flake/status-update-timeout/12345` -- resource status not updated within timeout
+- `test-flake/context-deadline-exceeded/TestCreateOrder` -- reconcile loop times out under load
 - `test-flake/systemic-all-pods-crashloop` -- ALL tests fail because pods crash on startup (no subcategory)
 - `test-flake/session-race/test_expired_token` -- race between session refresh and token validation
 - `bug/nil-pointer/TestParseConfig` -- nil map access when config section is missing (real defect)
@@ -93,9 +93,15 @@ Good (specific root cause, test ID as subcategory):
 
 When two tests fail for the SAME root cause, they share the same category
 and differ only in subcategory:
-- `test-flake/renderedversion-update-failure/78753`
-- `test-flake/renderedversion-update-failure/78684`
-Both hit the same update timeout -- one fix resolves both.
+- `test-flake/db-connection-pool-exhausted/TestCreateUser`
+- `test-flake/db-connection-pool-exhausted/TestDeleteUser`
+Both hit the same connection pool issue -- one fix resolves both.
+
+When two tests fail in the SAME function but for DIFFERENT reasons, they
+MUST be in different categories -- the root cause is what matters, not
+which function reported the failure:
+- `test-flake/db-connection-pool-exhausted/TestCreateUser`
+- `test-flake/dns-resolution-timeout/TestCreateUser`
 
 Bad (too vague, no test ID, lumps different root causes):
 - `test-flake/timeout` -- which test? what timed out?
@@ -108,14 +114,13 @@ and would be fixed by the SAME code change -- even if triggered by different
 tests. The key is understanding the actual root cause, not superficially
 matching error messages or category slug wording.
 
-1. **Same or different failure mode?** Compare error messages AND understand the
-   underlying cause. If the errors share the same structure (differing only in
-   run-specific values like IDs or timestamps), they are likely the SAME root
-   cause and MUST use the same category -- even across different tests. Only
-   assign different categories if the failure mechanism is genuinely different:
-   - A network connectivity error vs a logic assertion error
-   - A nil-pointer crash vs a timeout waiting for a resource
-   - An authentication failure vs a data validation failure
+1. **Same or different failure mode?** Focus on the specific error detail,
+   not the outer message structure. Two failures that trigger the same
+   assertion or helper function often have different root causes if the
+   *reason* they failed differs (e.g. "connection refused" vs "query
+   timeout" both surface through the same DB helper). Only treat errors
+   as the same root cause when the specific failure detail matches --
+   differing only in run-specific values like IDs or timestamps.
 
 2. **Systemic vs isolated failure**:
    - If ALL or nearly all jobs in a run fail with the same pattern,
@@ -138,7 +143,9 @@ matching error messages or category slug wording.
 ## Before creating a NEW category
 
 Before inventing a new category, check whether an existing one already covers
-the same root cause:
+the same root cause. Merging different root causes into one category is worse
+than having duplicate categories -- it hides distinct problems that need
+different fixes.
 
 1. Search progress.md (both "Categories So Far" and completed runs) for any
    category whose root cause might match your failure.
@@ -153,7 +160,8 @@ the same root cause:
    identifier (test ID, module, etc.) as the subcategory. If multiple categories match, pick the **oldest** one
    (earliest `run_started_at`).
 5. Only create a new category if no existing one has the same root cause.
-   Prefer generic root-cause names.
+   Use root-cause names specific enough to distinguish different failure
+   mechanisms.
 
 ## Fields to fill in
 
@@ -357,6 +365,11 @@ root cause. Compare summaries and error_message fields to decide: would
 the same fix resolve both? If so, update your per-run file to use the
 existing category (keeping your own subcategory). Pick the category used
 by the most runs; break ties by earliest run_started_at.
+
+Also check the reverse: if you reused an existing category, verify that
+the error_message and summary from other runs in that category actually
+describe the same failure mechanism as yours. If they don't, create a
+new category instead.
 
 Do NOT edit progress.md directly -- only edit your per-run file.
 Then set your run status to "done" (replace "classified" with "done").
