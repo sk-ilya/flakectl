@@ -24,14 +24,22 @@ The main output is **`report.md`**: a human-readable root-cause report you can q
 
 **Date:** 2026-02-19
 
-**12 failed runs** analyzed: **12 caused by flakes**, **0 caused by real failures**.
+**13 failed runs** analyzed: **12 caused by flakes**, **1 caused by real failures**.
 
 ## Summary
 
-| # | Category                               | Subcategory  | Runs/Jobs | Flake? | Last Occurred | Fix   |
-|---|----------------------------------------|--------------|----------|--------|---------------|-------|
-| 1 | `test-flake/hooks-lifecycle-timeout`   | 12345, 12346 | 9/12     | yes    | 2 days ago    | PR(s) |
-| 2 | `infra-flake/registry-502-bad-gateway` |              | 1/1      | yes    | 6 days ago    |       |
+### Flakes
+
+| # | Category                               | Subcategory  | Runs/Jobs | Last Occurred | Fix(-es)                                         |
+|---|----------------------------------------|--------------|-----------|---------------|--------------------------------------------------|
+| 1 | `test-flake/hooks-lifecycle-timeout`   | 12345, 12346 | 9/12      | 2 days ago    | [#42](https://github.com/my-org/my-repo/pull/42) |
+| 2 | `infra-flake/registry-502-bad-gateway` |              | 1/1       | 6 days ago    |                                                  |
+
+### Real Failures
+
+| # | Category           | Subcategory     | Runs/Jobs | Last Occurred | Fix(-es) |
+|---|--------------------|-----------------|-----------|---------------|----------|
+| 3 | `bug/nil-pointer`  | TestParseConfig | 1/1       | 1 day ago     |          |
 
 ## Root Causes (Detail)
 
@@ -42,12 +50,17 @@ The main output is **`report.md`**: a human-readable root-cause report you can q
 - **Failed runs:** 9
 - **Failed jobs:** 12
 - **Test IDs:** 12345, 12346
-- **Fix:** PR(s) (possibly)
+- **Fix(-es):**
+  - 2026-02-18 [#42](https://github.com/my-org/my-repo/pull/42) Fix lifecycle timeout
+  <details><summary>Possible fixes</summary>
+
+  - 2026-02-16 [abc123d](https://github.com/my-org/my-repo/commit/abc123d) Increase device wait timeout
+  </details>
 - **Example error:** `Timed out after 5m waiting for device status to converge`
 
-| Run ID | Branch | Date | Jobs Failed |
-|--------|--------|------|------------|
-| [21952435434](https://github.com/my-org/my-repo/actions/runs/21952435434) | main | 2026-02-12 | 1 |
+| Run ID                                                                    | Branch | Date       | Jobs Failed |
+|---------------------------------------------------------------------------|--------|------------|-------------|
+| [21952435434](https://github.com/my-org/my-repo/actions/runs/21952435434) | main   | 2026-02-12 | 1           |
 ```
 
 ## Classification categories
@@ -277,6 +290,7 @@ If you want to post-process results or feed them into tooling, flakectl also pro
           "run_url": "https://github.com/my-org/my-repo/actions/runs/21952435434",
           "branch": "main",
           "date": "2026-02-12",
+          "run_started_at": "2026-02-12T14:30:00Z",
           "jobs_failed": 1
         }
       ]

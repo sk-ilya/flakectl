@@ -8,11 +8,14 @@ from conftest import make_progress_content
 from flakectl.extract import (
     _build_category_data,
     _determine_flake_status,
+    _format_fix_detail_line,
     _format_fix_link,
     _load_fixes,
     _lookup_description,
+    _sort_fixes,
     _split_category,
     _summarize_runs,
+    _to_utc_epoch,
     relative_date,
     run,
 )
@@ -511,6 +514,36 @@ class TestRunIntegration:
 
 
 # ---------------------------------------------------------------------------
+# _to_utc_epoch
+# ---------------------------------------------------------------------------
+
+class TestToUtcEpoch:
+    def test_z_suffix(self):
+        assert _to_utc_epoch("2025-01-15T10:00:00Z") == 1736935200.0
+
+    def test_timezone_offset(self):
+        # +02:00 means 2 hours ahead, so UTC is 2 hours earlier
+        assert _to_utc_epoch("2025-01-15T12:00:00+02:00") == 1736935200.0
+
+    def test_date_only_midnight_utc(self):
+        assert _to_utc_epoch("2025-01-15") == 1736899200.0
+
+    def test_empty_string(self):
+        assert _to_utc_epoch("") == 0.0
+
+    def test_none_value(self):
+        assert _to_utc_epoch(None) == 0.0
+
+    def test_invalid_string(self):
+        assert _to_utc_epoch("not-a-date") == 0.0
+
+    def test_ordering(self):
+        earlier = _to_utc_epoch("2025-01-15T10:00:00Z")
+        later = _to_utc_epoch("2025-01-15T14:00:00Z")
+        assert earlier < later
+
+
+# ---------------------------------------------------------------------------
 # _split_category
 # ---------------------------------------------------------------------------
 
@@ -834,10 +867,12 @@ class TestRunWithFixes:
                     "category": "test-flake/timeout",
                     "items": [
                         {"type": "pr", "id": 42, "url": "https://example.com/pull/42",
-                         "title": "Fix timeout", "confidence": "match"},
+                         "title": "Fix timeout", "date": "2025-01-14T11:30:00Z",
+                         "confidence": "match"},
                         {"type": "commit", "sha": "deadbeef12345678",
                          "url": "https://example.com/commit/deadbeef12345678",
-                         "title": "Increase timeout", "confidence": "possible"},
+                         "title": "Increase timeout", "date": "2025-01-13T09:00:00Z",
+                         "confidence": "possible"},
                     ],
                 },
             ],
@@ -872,7 +907,7 @@ class TestRunWithFixes:
 
         md_text = md.read_text()
         # Summary table has Fix column with only confident matches
-        assert "| Fix |" in md_text
+        assert "| Fix(-es) |" in md_text
         # Extract the summary table (between "## Summary" and "## Root Causes")
         summary_section = md_text.split("## Summary")[1].split("## Root Causes")[0]
         assert "[#42]" in summary_section
@@ -902,12 +937,13 @@ class TestRunWithFixes:
             fixes_path=fixes_path)
 
         md_text = md.read_text()
-        # Detail section shows all fixes including possible ones
-        assert "- **Fix:**" in md_text
+        # Detail section shows all fixes with per-line format
+        assert "- **Fix(-es):**" in md_text
         detail_section = md_text.split("## Root Causes")[1]
         assert "[#42]" in detail_section
         assert "[deadbee]" in detail_section
-        assert "(possibly)" in detail_section
+        # Possible fixes are in a collapsible section
+        assert "<details><summary>Possible fixes</summary>" in detail_section
 
     def test_fixes_in_json_output(self, tmp_path):
         content = make_progress_content([
@@ -963,7 +999,7 @@ class TestRunWithFixes:
 
         assert rc == 0
         md_text = md.read_text()
-        assert "| Fix |" in md_text  # Column exists even without fixes
+        assert "| Fix(-es) |" in md_text  # Column exists even without fixes
 
         data = json.loads(js.read_text())
         # No fixes key when no fixes data
@@ -995,3 +1031,394 @@ class TestRunWithFixes:
 
         data = json.loads(js.read_text())
         assert "fixes" in data["categories"][0]
+
+    def test_fixes_json_includes_date(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout",
+                    "is_flake": "yes",
+                    "test_id": "TestSlow",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+        fixes_path = self._make_fixes_json(tmp_path)
+
+        js = tmp_path / "report.json"
+        run(str(progress), str(tmp_path / "report.md"), str(js),
+            fixes_path=fixes_path)
+
+        data = json.loads(js.read_text())
+        cat = data["categories"][0]
+        assert cat["fixes"][0]["date"] == "2025-01-14T11:30:00Z"
+        assert cat["fixes"][1]["date"] == "2025-01-13T09:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# _format_fix_detail_line
+# ---------------------------------------------------------------------------
+
+class TestFormatFixDetailLine:
+    def test_commit_match_with_full_timestamp(self):
+        item = {"type": "commit", "sha": "abc123def456789",
+                "url": "https://example.com/commit/abc123def456789",
+                "title": "Fix the thing", "date": "2026-02-18T14:30:00Z",
+                "confidence": "match"}
+        result = _format_fix_detail_line(item)
+        expected = (
+            "  - 2026-02-18"
+            " [abc123d](https://example.com/commit/abc123def456789)"
+            " Fix the thing"
+        )
+        assert result == expected
+
+    def test_pr_match_with_full_timestamp(self):
+        item = {"type": "pr", "id": 2535,
+                "url": "https://example.com/pull/2535",
+                "title": "EDM-3346: Fix rollback", "date": "2026-02-17T09:15:00Z",
+                "confidence": "match"}
+        result = _format_fix_detail_line(item)
+        expected = (
+            "  - 2026-02-17"
+            " [#2535](https://example.com/pull/2535)"
+            " EDM-3346: Fix rollback"
+        )
+        assert result == expected
+
+    def test_date_only_still_works(self):
+        item = {"type": "commit", "sha": "abc123def456789",
+                "url": "https://example.com/commit/abc123def456789",
+                "title": "Fix the thing", "date": "2026-02-18",
+                "confidence": "match"}
+        result = _format_fix_detail_line(item)
+        assert result.startswith("  - 2026-02-18 ")
+
+    def test_missing_date(self):
+        item = {"type": "commit", "sha": "abc123def456789",
+                "url": "https://example.com/commit/abc123def456789",
+                "title": "Fix it", "confidence": "match"}
+        result = _format_fix_detail_line(item)
+        assert result == "  - [abc123d](https://example.com/commit/abc123def456789) Fix it"
+
+    def test_missing_title(self):
+        item = {"type": "commit", "sha": "abc123def456789",
+                "url": "https://example.com/commit/abc123def456789",
+                "date": "2026-02-18T14:30:00Z", "confidence": "match"}
+        result = _format_fix_detail_line(item)
+        assert result == "  - 2026-02-18 [abc123d](https://example.com/commit/abc123def456789)"
+
+    def test_missing_date_and_title(self):
+        item = {"type": "pr", "id": 100,
+                "url": "https://example.com/pull/100",
+                "confidence": "possible"}
+        result = _format_fix_detail_line(item)
+        assert result == "  - [#100](https://example.com/pull/100)"
+
+
+# ---------------------------------------------------------------------------
+# _sort_fixes
+# ---------------------------------------------------------------------------
+
+class TestSortFixes:
+    def test_match_before_possible(self):
+        items = [
+            {"confidence": "possible", "date": "2026-02-18T14:00:00Z"},
+            {"confidence": "match", "date": "2026-02-10T09:00:00Z"},
+        ]
+        result = _sort_fixes(items)
+        assert result[0]["confidence"] == "match"
+        assert result[1]["confidence"] == "possible"
+
+    def test_newest_first_within_match(self):
+        items = [
+            {"confidence": "match", "date": "2026-02-10T09:00:00Z"},
+            {"confidence": "match", "date": "2026-02-18T14:00:00Z"},
+            {"confidence": "match", "date": "2026-02-14T12:00:00Z"},
+        ]
+        result = _sort_fixes(items)
+        assert [i["date"] for i in result] == [
+            "2026-02-18T14:00:00Z", "2026-02-14T12:00:00Z",
+            "2026-02-10T09:00:00Z"]
+
+    def test_same_day_different_times(self):
+        items = [
+            {"confidence": "match", "date": "2026-02-18T09:00:00Z"},
+            {"confidence": "match", "date": "2026-02-18T15:00:00Z"},
+            {"confidence": "match", "date": "2026-02-18T12:00:00Z"},
+        ]
+        result = _sort_fixes(items)
+        assert [i["date"] for i in result] == [
+            "2026-02-18T15:00:00Z", "2026-02-18T12:00:00Z",
+            "2026-02-18T09:00:00Z"]
+
+    def test_missing_dates_sort_last(self):
+        items = [
+            {"confidence": "match"},
+            {"confidence": "match", "date": "2026-02-10T09:00:00Z"},
+        ]
+        result = _sort_fixes(items)
+        assert result[0]["date"] == "2026-02-10T09:00:00Z"
+        assert result[1].get("date", "") == ""
+
+    def test_empty_list(self):
+        assert _sort_fixes([]) == []
+
+    def test_full_ordering(self):
+        items = [
+            {"confidence": "possible", "date": "2026-02-18T14:00:00Z"},
+            {"confidence": "match", "date": "2026-02-10T09:00:00Z"},
+            {"confidence": "possible", "date": "2026-02-14T12:00:00Z"},
+            {"confidence": "match", "date": "2026-02-16T11:00:00Z"},
+        ]
+        result = _sort_fixes(items)
+        assert [(i["confidence"], i["date"]) for i in result] == [
+            ("match", "2026-02-16T11:00:00Z"),
+            ("match", "2026-02-10T09:00:00Z"),
+            ("possible", "2026-02-18T14:00:00Z"),
+            ("possible", "2026-02-14T12:00:00Z"),
+        ]
+
+    def test_date_only_still_works(self):
+        items = [
+            {"confidence": "match", "date": "2026-02-10"},
+            {"confidence": "match", "date": "2026-02-18"},
+        ]
+        result = _sort_fixes(items)
+        assert [i["date"] for i in result] == ["2026-02-18", "2026-02-10"]
+
+
+# ---------------------------------------------------------------------------
+# Summary split by flake status
+# ---------------------------------------------------------------------------
+
+class TestSummarySplitByFlakeStatus:
+    def test_flakes_and_real_failures_tables(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout",
+                    "is_flake": "yes",
+                    "test_id": "T1",
+                    "error_message": "timeout",
+                    "summary": "timed out",
+                }],
+            },
+            {
+                "run_id": "200",
+                "status": "done",
+                "run_started_at": "2025-01-15T11:00:00Z",
+                "jobs": [{
+                    "name": "j2",
+                    "category": "bug/crash",
+                    "is_flake": "no",
+                    "test_id": "T2",
+                    "error_message": "segfault",
+                    "summary": "crashed",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+
+        md = tmp_path / "report.md"
+        run(str(progress), str(md), str(tmp_path / "report.json"))
+
+        md_text = md.read_text()
+        assert "### Flakes" in md_text
+        assert "### Real Failures" in md_text
+        # No Flake? column
+        assert "Flake?" not in md_text
+        # Continuous numbering: flake is 1, real is 2
+        flakes_section = md_text.split("### Flakes")[1].split("### Real Failures")[0]
+        assert "| 1 |" in flakes_section
+        real_section = md_text.split("### Real Failures")[1].split("**Total:")[0]
+        assert "| 2 |" in real_section
+
+    def test_all_flakes_omits_real_failures_heading(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "test-flake/timeout",
+                    "is_flake": "yes",
+                    "test_id": "T1",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+
+        md = tmp_path / "report.md"
+        run(str(progress), str(md), str(tmp_path / "report.json"))
+
+        md_text = md.read_text()
+        assert "### Flakes" in md_text
+        assert "### Real Failures" not in md_text
+
+    def test_all_real_failures_omits_flakes_heading(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "bug/crash",
+                    "is_flake": "no",
+                    "test_id": "T1",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+
+        md = tmp_path / "report.md"
+        run(str(progress), str(md), str(tmp_path / "report.json"))
+
+        md_text = md.read_text()
+        assert "### Flakes" not in md_text
+        assert "### Real Failures" in md_text
+
+    def test_mixed_flake_status_goes_to_real_failures(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [
+                    {
+                        "name": "j1",
+                        "category": "test-flake/timeout",
+                        "is_flake": "yes",
+                        "test_id": "T1",
+                    },
+                    {
+                        "name": "j2",
+                        "category": "test-flake/timeout",
+                        "is_flake": "no",
+                        "test_id": "T1",
+                    },
+                ],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+
+        md = tmp_path / "report.md"
+        run(str(progress), str(md), str(tmp_path / "report.json"))
+
+        md_text = md.read_text()
+        # Mixed goes to real failures
+        assert "### Flakes" not in md_text
+        assert "### Real Failures" in md_text
+
+    def test_detail_section_orders_flakes_before_real(self, tmp_path):
+        content = make_progress_content([
+            {
+                "run_id": "100",
+                "status": "done",
+                "run_started_at": "2025-01-15T10:00:00Z",
+                "jobs": [{
+                    "name": "j1",
+                    "category": "bug/crash",
+                    "is_flake": "no",
+                    "test_id": "T1",
+                    "error_message": "segfault",
+                    "summary": "crashed",
+                }],
+            },
+            {
+                "run_id": "200",
+                "status": "done",
+                "run_started_at": "2025-01-14T10:00:00Z",
+                "jobs": [{
+                    "name": "j2",
+                    "category": "test-flake/timeout",
+                    "is_flake": "yes",
+                    "test_id": "T2",
+                    "error_message": "timeout",
+                    "summary": "timed out",
+                }],
+            },
+        ])
+        progress = tmp_path / "progress.md"
+        progress.write_text(content)
+
+        md = tmp_path / "report.md"
+        run(str(progress), str(md), str(tmp_path / "report.json"))
+
+        md_text = md.read_text()
+        detail_section = md_text.split("## Root Causes (Detail)")[1]
+        # Flake category should appear before real failure in detail
+        flake_pos = detail_section.index("test-flake/timeout")
+        real_pos = detail_section.index("bug/crash")
+        assert flake_pos < real_pos
+
+
+# ---------------------------------------------------------------------------
+# Affected runs sort order
+# ---------------------------------------------------------------------------
+
+class TestAffectedRunsSortOrder:
+    def test_affected_runs_sorted_by_date_descending(self):
+        def make_row(run_id, run_started_at):
+            return {
+                "run_id": run_id,
+                "category": "test-flake/timeout",
+                "is_flake": "yes",
+                "test_id": "T1",
+                "run_started_at": run_started_at,
+                "run_url": f"https://example.com/{run_id}",
+                "branch": "main",
+                "error_message": "",
+                "summary": "",
+            }
+
+        rows = [
+            make_row("1", "2025-01-10T10:00:00Z"),
+            make_row("2", "2025-01-15T10:00:00Z"),
+            make_row("3", "2025-01-12T10:00:00Z"),
+        ]
+        result = _build_category_data(
+            [("test-flake/timeout", rows)], {}, date(2025, 1, 20)
+        )
+        dates = [r["date"] for r in result[0]["affected_runs"]]
+        assert dates == ["2025-01-15", "2025-01-12", "2025-01-10"]
+
+    def test_same_day_different_times_sorted(self):
+        def make_row(run_id, run_started_at):
+            return {
+                "run_id": run_id,
+                "category": "test-flake/timeout",
+                "is_flake": "yes",
+                "test_id": "T1",
+                "run_started_at": run_started_at,
+                "run_url": f"https://example.com/{run_id}",
+                "branch": "main",
+                "error_message": "",
+                "summary": "",
+            }
+
+        rows = [
+            make_row("1", "2025-01-15T08:00:00Z"),
+            make_row("2", "2025-01-15T16:00:00Z"),
+            make_row("3", "2025-01-15T12:00:00Z"),
+        ]
+        result = _build_category_data(
+            [("test-flake/timeout", rows)], {}, date(2025, 1, 20)
+        )
+        run_ids = [r["run_id"] for r in result[0]["affected_runs"]]
+        assert run_ids == ["2", "3", "1"]

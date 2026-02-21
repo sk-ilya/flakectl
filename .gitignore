@@ -27,3 +27,4 @@ candidates_prs.tsv
 *.log
 runs/
 files/
+repo/

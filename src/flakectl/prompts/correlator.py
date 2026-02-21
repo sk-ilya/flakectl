@@ -21,32 +21,37 @@ might address that root cause.
 You have access to the following tools ONLY. Do not attempt to use Bash,
 shell commands, or any tool not listed here.
 
-### Read, Grep, Write
+### Read, Grep, Glob, Write
 Standard file tools. Use Grep to search the pre-fetched candidate files
-(free, no rate limit, no API calls).
+(free, no rate limit, no API calls). Use Glob to explore the source
+repository clone. The repo clone path is given in the task description --
+use Read/Grep/Glob on it to read test files or source code to verify a
+commit/PR actually addresses the root cause.
 
-### get_commit(repo, sha)
-Get commit metadata and list of changed files for a specific commit SHA.
-Returns commit message, author, date, and for each changed file: filename,
-status (added/modified/removed), additions, and deletions.
-Free -- does NOT count against any rate limit. Use this to inspect
-promising commits found via Grep.
+### git(args)
+Run read-only git commands on the cloned repo. The clone directory is set
+automatically. Useful commands:
+- `git show HEAD:path/to/file` -- read a file from the repo
+- `git ls-files` -- list all files in the repo
+- `git log --oneline -10` -- recent commit history (limited by shallow clone)
+Note: the clone is shallow (--depth 1). `git show --stat HEAD` will NOT
+show the real commit diff -- use `gh api` with `--jq` instead.
 
-### get_file(repo, path, ref)
-Download a file from the source repository at a specific git ref.
-Use this to read test files or source code to verify a commit/PR
-actually addresses the root cause.
-Free -- does NOT count against any rate limit.
+### gh(args)
+Run read-only gh CLI commands scoped to the repo. The `--repo` flag is
+injected automatically for subcommands that accept it -- do NOT include
+`--repo` or `-R` in your args. Useful commands:
+- `gh pr view {number} --json body,title,files` -- PR description and files
+- `gh api repos/OWNER/REPO/commits/{sha} --jq '{message: .commit.message, files: [.files[] | {filename, status, additions, deletions}]}'` -- commit message + changed files (use `--jq` to avoid 50KB+ patch data)
+- `gh search commits 'query'` -- search commits (replaces gh_search)
+- `gh search prs 'query'` -- search PRs
+- `gh search issues 'query'` -- search issues
+- `gh search code 'query'` -- search code
+- `gh run view {run_id} --json jobs` -- view run details
 
-### gh_search(subject, args)
-Search GitHub using the gh CLI. Runs: `gh search <subject> --repo REPO <args>`
-- The `--repo` flag is pre-set. Do NOT include `--repo` or `-R` in args.
-- `subject` must be one of: `commits`, `prs`, `issues`, `code`
-- `args` is a free-form string of gh search flags and query terms
-
-**This is a FALLBACK tool.** The GitHub search API has a low rate limit
+**gh search is a FALLBACK tool.** The GitHub search API has a low rate limit
 (~30 requests per minute). You already have all commits and open PRs
-pre-fetched in local files -- Grep those first. Only use gh_search if
+pre-fetched in local files -- Grep those first. Only use `gh search` if
 you need to search beyond what the pre-fetched files contain (e.g.
 searching code, or finding issues related to a category).
 
@@ -62,7 +67,7 @@ files. These contain ALL commits and open PRs in the lookback window.
 
 **PRs file** (TSV format, one line per PR):
 ```
-#{number}\\t{created_date}\\t{title}\\t{url}
+#{number}\\t{created_datetime}\\t{title}\\t{url}
 ```
 
 Commit URLs are NOT in the file. Construct them as:
@@ -100,12 +105,16 @@ Tips:
 - Use case-insensitive grep for natural-language terms
 - GitHub search tokenizes on word boundaries, so camelCase identifiers
   may not match commit messages written in natural language -- try both
-  forms (e.g. grep for both `renderedVersion` and `rendered version`)
+  forms (e.g. grep for both `connectionPool` and `connection pool`)
 
 ### Step 3: Inspect promising candidates
 
 For each commit/PR that looks relevant from grep results:
-- Use `get_commit(repo, sha)` to see what files were changed (free)
+- Use `gh api repos/OWNER/REPO/commits/{sha} --jq '{message: .commit.message, files: [.files[] | {filename, status, additions, deletions}]}'`
+  to see the commit message and what files were changed (always use `--jq`
+  to avoid 50KB+ of patch data)
+- Use `gh pr view {number} --json body,title,files` to read PR descriptions
+  and see which files are modified
 - A fix for a test-flake often modifies the test itself (adding retries,
   increasing timeouts, fixing race conditions)
 - A fix for a bug category modifies the production code that the test
@@ -113,7 +122,7 @@ For each commit/PR that looks relevant from grep results:
 - A fix for an infra-flake might modify CI configuration, Dockerfiles,
   or deployment manifests
 
-Only use `gh_search` if the pre-fetched files were insufficient (rare).
+Only use `gh search` if the pre-fetched files were insufficient (rare).
 
 ### Step 4: Assign confidence
 
@@ -142,6 +151,7 @@ Write a JSON file called `fixes.json` with this exact schema:
           "id": 456,
           "url": "https://github.com/owner/repo/pull/456",
           "title": "PR title here",
+          "date": "2026-02-18T14:30:00Z",
           "confidence": "match"
         },
         {
@@ -149,6 +159,7 @@ Write a JSON file called `fixes.json` with this exact schema:
           "sha": "full-commit-sha-here",
           "url": "https://github.com/owner/repo/commit/full-commit-sha-here",
           "title": "Commit subject line here",
+          "date": "2026-02-16T09:15:00Z",
           "confidence": "possible"
         }
       ]
@@ -159,7 +170,9 @@ Write a JSON file called `fixes.json` with this exact schema:
 
 Rules:
 - Only include categories that have at least one fix candidate
-- Each item must have: type ("pr" or "commit"), url, title, confidence
+- Each item must have: type ("pr" or "commit"), url, title, date, confidence
+- date is the full ISO datetime as found in the TSV files: author date
+  for commits, created date for PRs (e.g. "2026-02-18T14:30:00Z")
 - PRs must have "id" (the PR number as integer)
 - Commits must have "sha" (the full commit SHA)
 - For commits, construct the URL as: https://github.com/OWNER/REPO/commit/SHA
