@@ -138,6 +138,148 @@ def _format_fix_link(item: dict) -> str:
     return link
 
 
+def _to_utc_epoch(ts: str) -> float:
+    """Parse an ISO timestamp or date string to UTC epoch seconds.
+
+    Handles full ISO timestamps (with Z or timezone offset),
+    and date-only strings (treated as midnight UTC).
+    Returns 0.0 for missing/invalid input.
+    """
+    if not ts:
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _sort_fixes(items: list[dict]) -> list[dict]:
+    """Sort fix items: match confidence first, then possible.
+
+    Within each group, sort by date newest first.
+    Missing dates sort to the end.
+    """
+    def key(item):
+        confidence_order = 0 if item.get("confidence") == "match" else 1
+        ts = _to_utc_epoch(item.get("date", ""))
+        return (confidence_order, 0 if ts else 1, -ts)
+
+    return sorted(items, key=key)
+
+
+def _format_fix_detail_line(item: dict) -> str:
+    """Format one fix as a detail line for the detail section.
+
+    Commit: '  - YYYY-MM-DD [hash](url) title'
+    PR:     '  - YYYY-MM-DD [#id](url) title'
+    """
+    raw = item.get("date", "")
+    d = raw[:10] if raw else ""
+    title = item.get("title", "")
+
+    if item.get("type") == "pr":
+        link = f"[#{item['id']}]({item['url']})"
+    else:
+        link = f"[{item['sha'][:7]}]({item['url']})"
+
+    parts = []
+    if d:
+        parts.append(d)
+    parts.append(link)
+    if title:
+        parts.append(title)
+
+    return "  - " + " ".join(parts)
+
+
+def _write_summary_table(f, indexed_cats: list[tuple[int, dict]]) -> None:
+    """Write one summary table for a list of (global_index, cat_data) pairs."""
+    f.write("| # | Category | Subcategory | Runs/Jobs | Last Occurred | Fix(-es) |\n")
+    f.write("|---|----------|-------------|-----------|---------------|----------|\n")
+
+    for idx, cat_data in indexed_cats:
+        subcats_str = ", ".join(cat_data["subcategories"])
+        # Summary table shows only match-confidence fixes, sorted by date newest first
+        match_fixes = [
+            item for item in cat_data.get("fixes", [])
+            if item.get("confidence") == "match"
+        ]
+        match_fixes = _sort_fixes(match_fixes)
+        fix_str = ", ".join(_format_fix_link(item) for item in match_fixes)
+        f.write(
+            f"| {idx} | `{cat_data['name']}` "
+            f"| {subcats_str} "
+            f"| {cat_data['run_count']}/{cat_data['job_count']} "
+            f"| {cat_data['last_occurred']} "
+            f"| {fix_str} |\n"
+        )
+
+
+def _write_detail_section(f, idx: int, cat_data: dict) -> None:
+    """Write one root-cause detail block."""
+    f.write(f"### {idx}. `{cat_data['name']}`\n\n")
+
+    if cat_data["description"]:
+        f.write(f"**Description:** {cat_data['description']}\n\n")
+
+    f.write(f"- **Failed runs:** {cat_data['run_count']}\n")
+    f.write(f"- **Failed jobs:** {cat_data['job_count']}\n")
+    if cat_data["test_ids"]:
+        f.write(f"- **Test IDs:** {', '.join(cat_data['test_ids'])}\n")
+
+    if cat_data.get("fixes"):
+        fixes = cat_data["fixes"]
+        # Split into commits and PRs
+        commits = [item for item in fixes if item.get("type") == "commit"]
+        prs = [item for item in fixes if item.get("type") == "pr"]
+        # Sort each group
+        commits = _sort_fixes(commits)
+        prs = _sort_fixes(prs)
+        # Commits first, then PRs
+        ordered = commits + prs
+
+        match_items = [item for item in ordered if item.get("confidence") == "match"]
+        possible_items = [item for item in ordered if item.get("confidence") != "match"]
+
+        f.write("- **Fix(-es):**\n")
+        for item in match_items:
+            f.write(_format_fix_detail_line(item) + "\n")
+        if possible_items:
+            f.write("  <details><summary>Possible fixes</summary>\n\n")
+            for item in possible_items:
+                f.write(_format_fix_detail_line(item) + "\n")
+            f.write("  </details>\n")
+
+    error = cat_data["example_error"]
+    if error:
+        if len(error) > 200:
+            error = error[:200] + "..."
+        f.write(f"- **Example error:** `{error}`\n")
+
+    summary = cat_data["example_summary"]
+    if summary:
+        if len(summary) > 600:
+            summary = summary[:600] + "..."
+        f.write(f"- **Example summary:** {summary}\n")
+
+    f.write("\n")
+
+    f.write("| Run ID | Branch | Date | Jobs Failed |\n")
+    f.write("|--------|--------|------|-------------|\n")
+    for affected_run in cat_data["affected_runs"]:
+        branch = affected_run["branch"]
+        if len(branch) > 40:
+            branch = branch[:37] + "..."
+        f.write(
+            f"| [{affected_run['run_id']}]({affected_run['run_url']}) | {branch} "
+            f"| {affected_run['date']} | {affected_run['jobs_failed']} |\n"
+        )
+    f.write("\n")
+
+
 def _build_category_data(sorted_cats, cat_descriptions, analysis_date,
                          fixes_by_cat=None):
     """Build a list of category summary dicts from sorted categories."""
@@ -172,8 +314,13 @@ def _build_category_data(sorted_cats, cat_descriptions, analysis_date,
                 "run_url": r0["run_url"],
                 "branch": r0["branch"],
                 "date": r0["run_started_at"][:10] if r0["run_started_at"] else "",
+                "run_started_at": r0["run_started_at"] or "",
                 "jobs_failed": len(run_rows),
             })
+
+        affected.sort(
+            key=lambda r: _to_utc_epoch(r["run_started_at"]), reverse=True,
+        )
 
         subcats = sorted(set(
             _split_category(r["category"])[1]
@@ -202,6 +349,15 @@ def _write_report_md(path, categories, total_runs, total_jobs,
                      total_flake_runs, total_bug_runs, total_unclear_runs,
                      unfinished, analysis_date):
     """Write the markdown report file."""
+    # Partition categories into flakes and real failures with continuous numbering
+    flake_cats = []
+    real_cats = []
+    for i, cat_data in enumerate(categories, 1):
+        if cat_data["flake"] == "yes":
+            flake_cats.append((i, cat_data))
+        else:
+            real_cats.append((i, cat_data))
+
     with open(path, "w") as f:
         f.write("# Flaky Test Analysis\n\n")
         f.write(f"**Date:** {analysis_date.isoformat()}\n\n")
@@ -214,73 +370,28 @@ def _write_report_md(path, categories, total_runs, total_jobs,
         f.write("Each category below maps to exactly **1 root cause / 1 fix**.\n\n")
 
         f.write("## Summary\n\n")
-        f.write("| # | Category | Subcategory | Runs/Jobs | Flake? | Last Occurred | Fix |\n")
-        f.write("|---|----------|-------------|-----------|--------|---------------|-----|\n")
 
-        for i, cat_data in enumerate(categories, 1):
-            subcats_str = ", ".join(cat_data["subcategories"])
-            fix_str = ", ".join(
-                _format_fix_link(item) for item in cat_data.get("fixes", [])
-                if item.get("confidence") == "match"
-            )
-            f.write(
-                f"| {i} | `{cat_data['name']}` "
-                f"| {subcats_str} "
-                f"| {cat_data['run_count']}/{cat_data['job_count']} "
-                f"| {cat_data['flake']} | {cat_data['last_occurred']} "
-                f"| {fix_str} |\n"
-            )
+        if flake_cats:
+            f.write("### Flakes\n\n")
+            _write_summary_table(f, flake_cats)
+            f.write("\n")
+
+        if real_cats:
+            f.write("### Real Failures\n\n")
+            _write_summary_table(f, real_cats)
+            f.write("\n")
 
         f.write(
-            f"\n**Total: {total_runs} failed runs, "
+            f"**Total: {total_runs} failed runs, "
             f"{total_jobs} failed jobs**\n\n"
         )
 
         f.write("---\n\n")
         f.write("## Root Causes (Detail)\n\n")
 
-        for i, cat_data in enumerate(categories, 1):
-            f.write(f"### {i}. `{cat_data['name']}`\n\n")
-
-            if cat_data["description"]:
-                f.write(f"**Description:** {cat_data['description']}\n\n")
-
-            f.write(f"- **Failed runs:** {cat_data['run_count']}\n")
-            f.write(f"- **Failed jobs:** {cat_data['job_count']}\n")
-            if cat_data["test_ids"]:
-                f.write(f"- **Test IDs:** {', '.join(cat_data['test_ids'])}\n")
-
-            if cat_data.get("fixes"):
-                fix_links = ", ".join(
-                    _format_fix_link(item) for item in cat_data["fixes"]
-                )
-                f.write(f"- **Fix:** {fix_links}\n")
-
-            error = cat_data["example_error"]
-            if error:
-                if len(error) > 200:
-                    error = error[:200] + "..."
-                f.write(f"- **Example error:** `{error}`\n")
-
-            summary = cat_data["example_summary"]
-            if summary:
-                if len(summary) > 600:
-                    summary = summary[:600] + "..."
-                f.write(f"- **Example summary:** {summary}\n")
-
-            f.write("\n")
-
-            f.write("| Run ID | Branch | Date | Jobs Failed |\n")
-            f.write("|--------|--------|------|-------------|\n")
-            for affected_run in cat_data["affected_runs"]:
-                branch = affected_run["branch"]
-                if len(branch) > 40:
-                    branch = branch[:37] + "..."
-                f.write(
-                    f"| [{affected_run['run_id']}]({affected_run['run_url']}) | {branch} "
-                    f"| {affected_run['date']} | {affected_run['jobs_failed']} |\n"
-                )
-            f.write("\n")
+        # Detail sections: flakes first, then real failures
+        for idx, cat_data in flake_cats + real_cats:
+            _write_detail_section(f, idx, cat_data)
 
         if unfinished:
             f.write("---\n\n")
@@ -319,6 +430,7 @@ def _write_report_json(path, categories, total_runs, total_jobs,
                     "sha": item.get("sha"),
                     "url": item.get("url"),
                     "title": item.get("title", ""),
+                    "date": item.get("date", ""),
                     "confidence": item.get("confidence"),
                 }
                 for item in cat_data["fixes"]

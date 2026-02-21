@@ -67,7 +67,7 @@ files. These contain ALL commits and open PRs in the lookback window.
 
 **PRs file** (TSV format, one line per PR):
 ```
-#{number}\\t{created_date}\\t{title}\\t{url}
+#{number}\\t{created_datetime}\\t{title}\\t{url}
 ```
 
 Commit URLs are NOT in the file. Construct them as:
@@ -151,6 +151,7 @@ Write a JSON file called `fixes.json` with this exact schema:
           "id": 456,
           "url": "https://github.com/owner/repo/pull/456",
           "title": "PR title here",
+          "date": "2026-02-18T14:30:00Z",
           "confidence": "match"
         },
         {
@@ -158,6 +159,7 @@ Write a JSON file called `fixes.json` with this exact schema:
           "sha": "full-commit-sha-here",
           "url": "https://github.com/owner/repo/commit/full-commit-sha-here",
           "title": "Commit subject line here",
+          "date": "2026-02-16T09:15:00Z",
           "confidence": "possible"
         }
       ]
@@ -168,7 +170,9 @@ Write a JSON file called `fixes.json` with this exact schema:
 
 Rules:
 - Only include categories that have at least one fix candidate
-- Each item must have: type ("pr" or "commit"), url, title, confidence
+- Each item must have: type ("pr" or "commit"), url, title, date, confidence
+- date is the full ISO datetime as found in the TSV files: author date
+  for commits, created date for PRs (e.g. "2026-02-18T14:30:00Z")
 - PRs must have "id" (the PR number as integer)
 - Commits must have "sha" (the full commit SHA)
 - For commits, construct the URL as: https://github.com/OWNER/REPO/commit/SHA

@@ -89,7 +89,7 @@ def _dump_candidates(
         n_commits = 0
 
     # All open PRs
-    jq_prs = '.[] | "#\\(.number)\\t\\(.createdAt[:10])\\t\\(.title)\\t\\(.url)"'
+    jq_prs = '.[] | "#\\(.number)\\t\\(.createdAt)\\t\\(.title)\\t\\(.url)"'
     try:
         result = subprocess.run(
             ["gh", "pr", "list", "--repo", repo, "--state", "open",
