@@ -81,6 +81,18 @@ def get_pending_runs(progress_path: str) -> list[str]:
     return get_runs_by_status(progress_path, "pending")
 
 
+def get_commit_shas(progress_path: str, run_ids: list[str]) -> dict[str, str]:
+    """Return {run_id: commit_sha} for the given runs."""
+    content = Path(progress_path).read_text()
+    result: dict[str, str] = {}
+    for rid, body in re.findall(RUN_BLOCK_RE, content, re.DOTALL):
+        if rid in run_ids:
+            sha = parse_field(body, "commit_sha")
+            if sha:
+                result[rid] = sha
+    return result
+
+
 def get_done_runs(progress_path: str) -> list[str]:
     """Parse progress.md and return list of done run IDs."""
     return get_runs_by_status(progress_path, "done")

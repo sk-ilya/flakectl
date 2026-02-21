@@ -6,7 +6,7 @@ All GitHub API calls go through this module.
 import functools
 import logging
 import os
-from typing import Any
+import subprocess
 
 import requests
 from github import Github
@@ -201,107 +201,74 @@ def download_job_log(repo_slug: str, job_id: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Repository content access (read-only, cached)
+# Local repository cloning
 # ---------------------------------------------------------------------------
 
-_repo_cache: dict[tuple, Any] = {}
+def clone_at_ref(repo_slug: str, dest: str, ref: str) -> str:
+    """Create a shallow clone of a repository at a specific commit.
+
+    Uses git init + fetch --depth 1 + checkout to create a minimal clone
+    containing only the tree at the given ref. Idempotent: skips if the
+    destination already contains a .git directory.
+
+    Returns the absolute path to the cloned directory.
+    """
+    _validate_repo(repo_slug)
+    git_dir = os.path.join(dest, ".git")
+    if os.path.exists(git_dir):
+        return os.path.abspath(dest)
+
+    token = _get_token()
+    url = f"https://x-access-token:{token}@github.com/{repo_slug}.git"
+    os.makedirs(dest, exist_ok=True)
+
+    subprocess.run(
+        ["git", "init"],
+        cwd=dest, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", url],
+        cwd=dest, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "fetch", "--depth", "1", "origin", ref],
+        cwd=dest, capture_output=True, check=True, timeout=300,
+    )
+    subprocess.run(
+        ["git", "checkout", "FETCH_HEAD"],
+        cwd=dest, capture_output=True, check=True,
+    )
+    return os.path.abspath(dest)
 
 
-def _cached(key: tuple, fn):
-    """Return cached result or call fn(), cache it, and return it."""
-    if key in _repo_cache:
-        return _repo_cache[key]
-    result = fn()
-    _repo_cache[key] = result
+def ensure_repo_clones(
+    repo_slug: str, base_dir: str, refs: list[str],
+) -> dict[str, str]:
+    """Ensure shallow clones exist for each ref.
+
+    Creates ``{base_dir}/{ref[:8]}/`` directories, one per unique ref
+    prefix. Returns a mapping from full ref to the local clone path.
+    """
+    os.makedirs(base_dir, exist_ok=True)
+    result: dict[str, str] = {}
+    seen_prefixes: set[str] = set()
+    for ref in refs:
+        prefix = ref[:8]
+        if prefix in seen_prefixes:
+            # Two different full SHAs with the same 8-char prefix -- rare
+            # but possible.  Skip the duplicate to avoid clobbering.
+            result[ref] = os.path.abspath(os.path.join(base_dir, prefix))
+            continue
+        seen_prefixes.add(prefix)
+        dest = os.path.join(base_dir, prefix)
+        logger.info("Cloning %s at %s into %s...", repo_slug, prefix, dest)
+        try:
+            path = clone_at_ref(repo_slug, dest, ref)
+            result[ref] = path
+            logger.info("Clone ready at %s", path)
+        except subprocess.CalledProcessError as exc:
+            logger.error(
+                "Failed to clone %s at %s: %s", repo_slug, prefix,
+                exc.stderr.decode() if exc.stderr else exc,
+            )
     return result
-
-
-def get_file_content(repo_slug: str, path: str, ref: str) -> str:
-    """Get file content from a repository at a specific ref.
-
-    Uses the GitHub Contents API with raw media type.
-    Returns decoded text. Cached by (repo, path, ref).
-    """
-    def _fetch():
-        _validate_repo(repo_slug)
-        token = _get_token()
-        url = f"https://api.github.com/repos/{repo_slug}/contents/{path}"
-        resp = requests.get(
-            url,
-            params={"ref": ref},
-            headers={
-                "Authorization": f"token {token}",
-                "Accept": "application/vnd.github.raw+json",
-            },
-        )
-        resp.raise_for_status()
-        return resp.text
-
-    return _cached(("file", repo_slug, path, ref), _fetch)
-
-
-def get_commit_info(repo_slug: str, sha: str) -> dict:
-    """Get commit metadata and list of changed files.
-
-    Returns a dict with keys: sha, message, author, date, files.
-    Each file has: filename, status, additions, deletions (no patches).
-    Cached by (repo, sha).
-    """
-    def _fetch():
-        _validate_repo(repo_slug)
-        client = get_client()
-        repo = client.get_repo(repo_slug)
-        commit = repo.get_commit(sha)
-
-        files = []
-        for f in commit.files:
-            files.append({
-                "filename": f.filename,
-                "status": f.status,
-                "additions": f.additions,
-                "deletions": f.deletions,
-            })
-
-        return {
-            "sha": commit.sha,
-            "message": commit.commit.message,
-            "author": commit.commit.author.name,
-            "date": commit.commit.author.date.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "files": files,
-        }
-
-    return _cached(("commit", repo_slug, sha), _fetch)
-
-
-def list_directory(repo_slug: str, path: str, ref: str) -> list[dict]:
-    """List files and directories at a path in the repository.
-
-    Returns a list of dicts with keys: name, type, path, size.
-    type is 'file' or 'dir'. Cached by (repo, path, ref).
-    """
-    def _fetch():
-        _validate_repo(repo_slug)
-        token = _get_token()
-        url = f"https://api.github.com/repos/{repo_slug}/contents/{path}"
-        resp = requests.get(
-            url,
-            params={"ref": ref},
-            headers={
-                "Authorization": f"token {token}",
-                "Accept": "application/vnd.github+json",
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        if isinstance(data, dict):
-            return [{"name": data["name"], "type": data["type"],
-                     "path": data["path"], "size": data.get("size", 0)}]
-
-        return [
-            {"name": item["name"], "type": item["type"],
-             "path": item["path"], "size": item.get("size", 0)}
-            for item in data
-        ]
-
-    return _cached(("dir", repo_slug, path, ref), _fetch)

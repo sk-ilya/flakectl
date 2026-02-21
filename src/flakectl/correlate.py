@@ -23,9 +23,10 @@ from claude_agent_sdk import (
 )
 
 from flakectl.agentlog import log_blocks
+from flakectl.github import clone_at_ref
 from flakectl.progressfile import RUN_BLOCK_RE, parse_categories_section
 from flakectl.prompts.correlator import CORRELATOR_AGENT_PROMPT
-from flakectl.tools import create_correlate_tools_server
+from flakectl.tools import create_tools_server
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,7 @@ async def _run_correlator(
     n_commits: int,
     prs_path: str,
     n_prs: int,
+    repo_path: str = "",
     model: str = "sonnet",
     max_turns: int = 80,
 ) -> None:
@@ -123,11 +125,15 @@ async def _run_correlator(
         datetime.now(UTC) - timedelta(days=lookback_days)
     ).strftime("%Y-%m-%d")
 
+    repo_msg = (
+        f"Source repository is cloned at `{repo_path}`.\n"
+        if repo_path else ""
+    )
     task = (
         f"Match root-cause categories in {progress_path} to fix commits/PRs.\n"
         f"REPO={repo}. Lookback: {lookback_days} days (since {since_date}).\n"
         f"Branches with failures: {', '.join(branches) if branches else 'main'}.\n"
-        f"\n"
+        f"{repo_msg}\n"
         f"Pre-fetched data (Grep these first -- free, no rate limit):\n"
         f"- {commits_path}: all {n_commits} commits in the lookback window "
         f"(TSV: sha, date, subject)\n"
@@ -141,15 +147,14 @@ async def _run_correlator(
         model=model,
         system_prompt=CORRELATOR_AGENT_PROMPT,
         allowed_tools=[
-            "Read", "Grep", "Write",
-            "mcp__correlate__gh_search",
-            "mcp__correlate__get_commit",
-            "mcp__correlate__get_file",
+            "Read", "Grep", "Write", "Glob",
+            "mcp__github__git",
+            "mcp__github__gh",
         ],
         permission_mode="acceptEdits",
         max_turns=max_turns,
         cwd=cwd,
-        mcp_servers={"correlate": create_correlate_tools_server(repo)},
+        mcp_servers={"github": create_tools_server(repo, repo_dir=repo_path)},
     )
 
     async with ClaudeSDKClient(options=options) as client:
@@ -200,6 +205,23 @@ def run(
     logger.info("Dumped %d commits to %s, %d open PRs to %s",
                 n_commits, commits_path, n_prs, prs_path)
 
+    # Ensure a repo clone exists for the correlator (clone at default branch)
+    repo_base = os.path.join(cwd, "repo")
+    repo_head = os.path.join(repo_base, "HEAD")
+    if not os.path.exists(os.path.join(repo_head, ".git")):
+        logger.info("Cloning %s at HEAD into %s...", repo, repo_head)
+        try:
+            clone_at_ref(repo, repo_head, "HEAD")
+        except subprocess.CalledProcessError as exc:
+            logger.warning(
+                "Failed to clone repo for correlator: %s",
+                exc.stderr.decode() if exc.stderr else exc,
+            )
+            repo_head = ""
+    repo_path = repo_head if os.path.exists(
+        os.path.join(repo_head, ".git")
+    ) else ""
+
     # Launch agent
     logger.info("Starting correlator agent (model=%s, max_turns=%d)",
                 model, max_turns)
@@ -207,6 +229,7 @@ def run(
         repo, progress_path, lookback_days, branches, cwd,
         commits_path=commits_path, n_commits=n_commits,
         prs_path=prs_path, n_prs=n_prs,
+        repo_path=repo_path,
         model=model, max_turns=max_turns,
     ))
 

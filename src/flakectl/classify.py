@@ -2,17 +2,23 @@
 """Orchestrate flaky test classification using Claude Agent SDK.
 
 Launches one classifier agent per pending run. Each agent writes to its
-own per-run file under runs/ (zero contention). The orchestrator polls
-per-run files for completion, incrementally merges finished runs back
-into progress.md so still-running agents can read it for context,
-retries failed agents, marks persistent failures as error, then merges
-categories.
+own per-run file under runs/ (zero contention). Classification runs in
+two phases separated by a synchronization gate:
+
+  Phase 1 (classify): all agents classify in parallel, merging results
+  into progress.md as they finish. Agents wait at the gate after merging.
+
+  Phase 2 (recheck): once all agents have classified (or failed), the
+  gate opens and agents recheck categories with full visibility of every
+  classification. Same client session -- agents have full context.
+
+This ensures every recheck sees every category, eliminating race
+conditions where early rechecks miss late classifications.
 """
 
 import asyncio
 import logging
 import os
-import time
 from pathlib import Path
 
 from claude_agent_sdk import (
@@ -23,7 +29,9 @@ from claude_agent_sdk import (
 )
 
 from flakectl.agentlog import RESET, agent_color, log_blocks
+from flakectl.github import ensure_repo_clones
 from flakectl.progressfile import (
+    get_commit_shas,
     get_done_runs,
     get_pending_runs,
     is_run_classified,
@@ -35,7 +43,7 @@ from flakectl.progressfile import (
     split_progress,
 )
 from flakectl.prompts.classifier import RECHECK_PROMPT, build_system_prompt
-from flakectl.tools import create_github_tools_server
+from flakectl.tools import create_tools_server
 
 logger = logging.getLogger(__name__)
 
@@ -73,142 +81,110 @@ async def _run_agent_phase(
     return check_fn(run_file, run_id)
 
 
-def _scan_run_statuses(
-    run_ids: set[str], run_files: dict[str, str],
-) -> tuple[set[str], set[str]]:
-    """Scan per-run files, return (done, classified) sets."""
-    done = set()
-    classified = set()
-    for rid in run_ids:
-        if rid in run_files:
-            if is_run_done(run_files[rid], rid):
-                done.add(rid)
-            elif is_run_classified(run_files[rid], rid):
-                classified.add(rid)
-    return done, classified
-
-
-def _merge_stragglers(
-    run_id_set: set[str], run_files: dict[str, str],
-    progress_path: str, merged: set[str],
-) -> set[str]:
-    """Merge unmerged done/classified runs. Returns final done set. Mutates merged.
-
-    Called after all asyncio tasks are done/cancelled -- no concurrency concerns.
-    Done stragglers are merged first, then classified stragglers (promoted to done).
-    """
-    done, classified_only = _scan_run_statuses(run_id_set, run_files)
-
-    stragglers = done - merged
-    if stragglers:
-        logger.info("Merging %d straggler runs (done): %s",
-                    len(stragglers), sorted(stragglers))
-    for rid in stragglers:
-        c = agent_color(rid)
-        ok = merge_run(progress_path, rid, run_files[rid])
-        if ok:
-            merged.add(rid)
-            logger.info("%s[run %s] Straggler merged into %s%s",
-                        c, rid, progress_path, RESET)
-        else:
-            logger.error("%s[run %s] Straggler merge FAILED%s", c, rid, RESET)
-
-    classified_stragglers = classified_only - merged
-    if classified_stragglers:
-        logger.info("Merging %d straggler runs (classified only): %s",
-                    len(classified_stragglers), sorted(classified_stragglers))
-    for rid in classified_stragglers:
-        c = agent_color(rid)
-        ok = merge_run(progress_path, rid, run_files[rid],
-                       expected_status="classified")
-        if ok:
-            promote_run_status(progress_path, rid, "classified", "done")
-            merged.add(rid)
-            done.add(rid)
-            logger.info("%s[run %s] Classified straggler merged into %s%s",
-                        c, rid, progress_path, RESET)
-        else:
-            logger.error("%s[run %s] Classified straggler merge FAILED%s",
-                         c, rid, RESET)
-
-    return done
-
-
 async def _run_and_merge(
     run_id: str, repo: str, run_file: str, cwd: str,
     progress_path: str, merged: set[str],
     merge_lock: asyncio.Lock,
+    classify_counter: list[int],
+    total_agents: int,
+    recheck_gate: asyncio.Event,
+    repo_path: str = "",
     context: str = "",
     model: str = "sonnet",
     max_turns: int = 50,
 ) -> None:
-    """Classify a run, merge results, recheck categories, then final-merge.
+    """Classify a run, wait for all agents, then recheck.
 
-    Uses a single ClaudeSDKClient session for both classification and
-    recheck. The merge between phases ensures the recheck reads up-to-date
-    categories from progress.md.
+    Uses a single ClaudeSDKClient session for both phases so the recheck
+    agent has full conversation context from classification. A gate event
+    synchronizes between phases: the agent waits after classify until all
+    agents have finished classifying (or crashed), then proceeds to recheck
+    with full visibility of every category.
     """
     system_prompt = build_system_prompt(context=context)
+    repo_msg = (
+        f"Source repository at this commit is cloned at `{repo_path}`. "
+        if repo_path else ""
+    )
     task = (
         f"Classify run {run_id}. REPO={repo}. "
         f"Your progress file: {run_file}. "
+        f"{repo_msg}"
         f"Read progress.md for context (categories, prior runs)."
     )
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=system_prompt,
-        allowed_tools=["Read", "Edit", "Grep",
-                       "mcp__github__get_jobs", "mcp__github__download_log",
-                       "mcp__github__get_file", "mcp__github__get_commit",
-                       "mcp__github__list_repo_dir"],
+        allowed_tools=["Read", "Edit", "Grep", "Glob",
+                       "mcp__github__download_log",
+                       "mcp__github__git",
+                       "mcp__github__gh"],
         permission_mode="acceptEdits",
         max_turns=max_turns,
         cwd=cwd,
-        mcp_servers={"github": create_github_tools_server()},
+        mcp_servers={"github": create_tools_server(repo, repo_dir=repo_path)},
     )
     c = agent_color(run_id)
+    classified = False
+    counted = False  # whether this agent has incremented classify_counter
+
+    def _signal_classify_done():
+        """Increment counter and open gate if all agents are done."""
+        nonlocal counted
+        if counted:
+            return
+        counted = True
+        classify_counter[0] += 1
+        if classify_counter[0] >= total_agents and not recheck_gate.is_set():
+            rebuild_categories_section(progress_path)
+            logger.info("All %d agents finished classify, "
+                        "opening recheck gate", total_agents)
+            recheck_gate.set()
+
     try:
         async with ClaudeSDKClient(options=options) as client:
             # Phase 1: Classify
             ok = await _run_agent_phase(
                 client, task, is_run_classified, run_file, run_id,
                 "classify", c, max_turns=max_turns)
-            if not ok:
+            if ok:
+                async with merge_lock:
+                    ok = merge_run(progress_path, run_id, run_file,
+                                   expected_status="classified")
+                if ok:
+                    classified = True
+                    rebuild_categories_section(progress_path)
+                    logger.info("%s[run %s] Preliminary merge into %s%s",
+                                c, run_id, progress_path, RESET)
+                else:
+                    logger.error("%s[run %s] Preliminary merge FAILED%s",
+                                 c, run_id, RESET)
+
+            # Signal classify done and wait for all agents
+            _signal_classify_done()
+            await recheck_gate.wait()
+
+            if not classified:
                 return
 
-            # Preliminary merge: make results visible to other agents
-            async with merge_lock:
-                ok = merge_run(progress_path, run_id, run_file,
-                               expected_status="classified")
-            if not ok:
-                logger.error("%s[run %s] Preliminary merge FAILED%s",
-                             c, run_id, RESET)
-                return
-            rebuild_categories_section(progress_path)
-            logger.info("%s[run %s] Preliminary merge into %s%s",
-                        c, run_id, progress_path, RESET)
-
-            # Phase 2: Recheck (same session, agent has full context)
+            # Phase 2: Recheck (same session, full context)
             ok = await _run_agent_phase(
                 client, RECHECK_PROMPT, is_run_done, run_file, run_id,
                 "recheck", c)
-            if not ok:
-                return
-
-            # Final merge: update with any category changes from recheck
-            async with merge_lock:
-                ok = merge_run(progress_path, run_id, run_file)
             if ok:
-                merged.add(run_id)
-                rebuild_categories_section(progress_path)
-                logger.info("%s[run %s] Final merge into %s%s",
-                            c, run_id, progress_path, RESET)
-            else:
-                logger.error("%s[run %s] Final merge FAILED%s",
-                             c, run_id, RESET)
+                async with merge_lock:
+                    ok = merge_run(progress_path, run_id, run_file)
+                if ok:
+                    merged.add(run_id)
+                    logger.info("%s[run %s] Final merge into %s%s",
+                                c, run_id, progress_path, RESET)
+                else:
+                    logger.error("%s[run %s] Final merge FAILED%s",
+                                 c, run_id, RESET)
     except Exception as e:
         logger.warning("%s[run %s] Agent crashed: %s%s",
                        c, run_id, e, RESET)
+        _signal_classify_done()
 
 
 async def _classify_all(
@@ -217,104 +193,109 @@ async def _classify_all(
     progress_path: str,
     run_files: dict[str, str],
     cwd: str,
+    repo_paths: dict[str, str] | None = None,
     context: str = "",
     model: str = "sonnet",
-    max_retries: int = 2,
     stale_timeout_min: int = 60,
     max_turns: int = 50,
 ) -> tuple[set[str], set[str]]:
-    """Launch classifier agents and poll until all finish or retries exhausted.
+    """Launch classifier agents with two-phase synchronization.
 
-    Each classifier runs as an independent ClaudeSDKClient session that writes
-    to its own per-run file (no contention). Each task merges its results into
-    progress.md immediately on completion via _run_and_merge, so still-running
-    agents see newly-completed classifications without waiting for a poll cycle.
+    Phase 1: all agents classify in parallel, merging as they finish.
+    Phase 2: after all classify, agents recheck with full category visibility.
+
     Returns (done, unfinished).
     """
     run_id_set = set(run_ids)
-    retries: dict[str, int] = {rid: 0 for rid in run_ids}
     merged: set[str] = set()
     merge_lock = asyncio.Lock()
+    rp = repo_paths or {}
+
+    # Synchronization: counter tracks how many agents finished classify,
+    # gate blocks recheck until all are done.
+    classify_counter = [0]
+    recheck_gate = asyncio.Event()
 
     tasks = {
         rid: asyncio.create_task(
             _run_and_merge(rid, repo, run_files[rid], cwd,
                            progress_path, merged, merge_lock,
+                           classify_counter, len(run_ids), recheck_gate,
+                           repo_path=rp.get(rid, ""),
                            context=context, model=model,
                            max_turns=max_turns))
         for rid in run_ids
     }
     logger.info("Launched %d classifier agents", len(tasks))
 
-    prev_progress = 0
-    last_progress_time = time.monotonic()
+    # Periodic status reporter
+    async def _status_reporter():
+        total = len(run_ids)
+        while True:
+            await asyncio.sleep(30)
+            n_classified = classify_counter[0]
+            n_done = len(merged)
+            n_tasks_finished = sum(1 for t in tasks.values() if t.done())
+            if recheck_gate.is_set():
+                logger.info(
+                    "Status: classify %d/%d, recheck done %d/%d, "
+                    "tasks finished %d/%d",
+                    n_classified, total, n_done, n_classified,
+                    n_tasks_finished, total)
+            else:
+                logger.info(
+                    "Status: classify %d/%d (waiting for gate), "
+                    "tasks finished %d/%d",
+                    n_classified, total, n_tasks_finished, total)
 
-    while True:
-        await asyncio.sleep(30)
+    # Watchdog: if no progress for stale_timeout_min, force the gate open
+    async def _watchdog():
+        timeout = stale_timeout_min * 60
+        await asyncio.sleep(timeout)
+        if not recheck_gate.is_set():
+            logger.warning(
+                "Stale timeout (%.0f min): %d/%d agents classified, "
+                "forcing recheck gate",
+                stale_timeout_min, classify_counter[0], len(run_ids))
+            rebuild_categories_section(progress_path)
+            recheck_gate.set()
 
-        done, classified = _scan_run_statuses(run_id_set, run_files)
-        remaining = run_id_set - done
+    status_task = asyncio.create_task(_status_reporter())
+    watchdog = asyncio.create_task(_watchdog())
 
-        logger.info("Poll: %d/%d done, %d classified, %d remaining",
-                    len(done), len(run_ids), len(classified),
-                    len(remaining))
+    # Wait for all agent tasks to complete
+    await asyncio.gather(*tasks.values(), return_exceptions=True)
+    status_task.cancel()
+    watchdog.cancel()
 
-        if not remaining:
-            # Per-run files are all "done", but tasks may still be
-            # merging.  Continue looping until tasks complete.
-            if all(tasks[rid].done() for rid in run_id_set):
-                break
-            # else: keep polling -- tasks are finishing their merges
-            continue
+    # Merge any stragglers (classified but not merged, or done but not merged)
+    done, classified_only = set(), set()
+    for rid in run_id_set:
+        if rid in run_files:
+            if is_run_done(run_files[rid], rid):
+                done.add(rid)
+            elif is_run_classified(run_files[rid], rid):
+                classified_only.add(rid)
 
-        # Relaunch crashed agents that haven't exhausted retries
-        for rid in remaining:
-            if tasks[rid].done() and retries[rid] < max_retries:
-                retries[rid] += 1
-                logger.info("[run %s] Relaunching (retry %d/%d)",
-                            rid, retries[rid], max_retries)
-                tasks[rid] = asyncio.create_task(
-                    _run_and_merge(rid, repo, run_files[rid], cwd,
-                                   progress_path, merged, merge_lock,
-                                   context=context, model=model,
-                                   max_turns=max_turns))
-
-        # All remaining agents exited and retries exhausted
-        if all(tasks[rid].done() for rid in remaining):
-            logger.info("All agents for %d remaining runs have exited",
-                        len(remaining))
-            break
-
-        # No progress for stale_timeout_min -> give up
-        current_progress = len(done) + len(classified) + len(merged)
-        if current_progress > prev_progress:
-            last_progress_time = time.monotonic()
-            prev_progress = current_progress
-        else:
-            elapsed_min = (time.monotonic() - last_progress_time) / 60
-            if elapsed_min >= stale_timeout_min:
-                logger.warning("No progress for %.0f min, stopping",
-                               elapsed_min)
-                break
-
-    # Cancel any still-running agents (only reached on timeout/exhausted retries)
-    pending_tasks = [t for t in tasks.values() if not t.done()]
-    if pending_tasks:
-        logger.warning("Cancelling %d stuck tasks", len(pending_tasks))
-        for task in pending_tasks:
-            task.cancel()
-        # Yield to let cancellation propagate
-        await asyncio.sleep(0)
-
-    done = _merge_stragglers(run_id_set, run_files, progress_path, merged)
+    for rid in (done | classified_only) - merged:
+        c = agent_color(rid)
+        is_done = rid in done
+        ok = merge_run(progress_path, rid, run_files[rid],
+                       expected_status=None if is_done else "classified")
+        if ok:
+            if not is_done:
+                promote_run_status(progress_path, rid, "classified", "done")
+            merged.add(rid)
+            logger.info("%s[run %s] Straggler merged into %s%s",
+                        c, rid, progress_path, RESET)
 
     if merged:
         rebuild_categories_section(progress_path)
 
     unfinished = run_id_set - merged
-    logger.info("Merge summary: %d merged, %d done, %d unfinished",
-                len(merged), len(done), len(unfinished))
-    return done, unfinished
+    logger.info("Merge summary: %d merged, %d unfinished",
+                len(merged), len(unfinished))
+    return merged, unfinished
 
 
 async def run_orchestrator(
@@ -330,6 +311,18 @@ async def run_orchestrator(
     logger.info("Found %d pending runs", len(pending))
     cwd = workdir or os.getcwd()
 
+    # Pre-clone the repository for each unique commit SHA
+    sha_map = get_commit_shas(progress, pending)
+    unique_shas = sorted(set(sha_map.values()))
+    repo_paths: dict[str, str] = {}
+    if unique_shas:
+        logger.info("Cloning %s at %d unique ref(s)...", repo, len(unique_shas))
+        repo_base = os.path.join(cwd, "repo")
+        clone_map = ensure_repo_clones(repo, repo_base, unique_shas)
+        for rid, sha in sha_map.items():
+            if sha in clone_map:
+                repo_paths[rid] = clone_map[sha]
+
     # Split into per-run files (agents write here, zero contention)
     run_files = split_progress(progress, pending)
     run_ids = [rid for rid in pending if rid in run_files]
@@ -343,10 +336,9 @@ async def run_orchestrator(
         logger.warning("No runnable runs found after split")
         return
 
-    # Agents read progress.md for context, write to per-run files
-    # Orchestrator incrementally merges completed runs back into progress.md
     done, unfinished = await _classify_all(
-        run_ids, repo, progress, run_files, cwd, context=context,
+        run_ids, repo, progress, run_files, cwd,
+        repo_paths=repo_paths, context=context,
         model=model, stale_timeout_min=stale_timeout_min,
         max_turns=max_turns)
     unfinished |= set(missing)

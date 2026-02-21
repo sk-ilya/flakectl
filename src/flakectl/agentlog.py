@@ -23,8 +23,8 @@ def agent_color(run_id: str) -> str:
 def tool_summary(block: ToolUseBlock) -> str:
     """Format a one-line summary of a tool call."""
     inp = json.dumps(block.input, ensure_ascii=False)
-    if len(inp) > 200:
-        inp = inp[:197] + "..."
+    if len(inp) > 2000:
+        inp = inp[:1997] + "..."
     return f"{block.name}: {inp}"
 
 
@@ -32,6 +32,9 @@ def log_blocks(message: AssistantMessage, prefix: str = "", suffix: str = "") ->
     """Log TextBlock and ToolUseBlock content from an AssistantMessage."""
     for block in message.content:
         if isinstance(block, TextBlock) and block.text.strip():
-            logger.info("%s%s%s", prefix, block.text.strip()[:600], suffix)
+            text = block.text.strip()
+            if len(text) > 5000:
+                text = text[:4997] + "..."
+            logger.info("%s%s%s", prefix, text, suffix)
         elif isinstance(block, ToolUseBlock):
             logger.info("%s%s%s", prefix, tool_summary(block), suffix)

@@ -5,6 +5,7 @@ from conftest import make_progress_content
 
 from flakectl.agentlog import agent_color
 from flakectl.progressfile import (
+    get_commit_shas,
     get_done_runs,
     get_pending_runs,
     get_runs_by_status,
@@ -87,6 +88,46 @@ class TestGetRunsByStatus:
         p.write_text(content)
         result = get_runs_by_status(str(p), "done")
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# get_commit_shas
+# ---------------------------------------------------------------------------
+
+class TestGetCommitShas:
+    def test_extracts_shas(self, tmp_path):
+        content = make_progress_content([
+            {"run_id": "100", "status": "pending", "commit_sha": "aaa111",
+             "jobs": [{"name": "j1"}]},
+            {"run_id": "200", "status": "pending", "commit_sha": "bbb222",
+             "jobs": [{"name": "j2"}]},
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+        result = get_commit_shas(str(p), ["100", "200"])
+        assert result == {"100": "aaa111", "200": "bbb222"}
+
+    def test_filters_by_run_ids(self, tmp_path):
+        content = make_progress_content([
+            {"run_id": "100", "status": "pending", "commit_sha": "aaa111",
+             "jobs": [{"name": "j1"}]},
+            {"run_id": "200", "status": "pending", "commit_sha": "bbb222",
+             "jobs": [{"name": "j2"}]},
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+        result = get_commit_shas(str(p), ["100"])
+        assert result == {"100": "aaa111"}
+
+    def test_missing_run_id_skipped(self, tmp_path):
+        content = make_progress_content([
+            {"run_id": "100", "status": "pending", "commit_sha": "aaa111",
+             "jobs": [{"name": "j1"}]},
+        ])
+        p = tmp_path / "progress.md"
+        p.write_text(content)
+        result = get_commit_shas(str(p), ["100", "999"])
+        assert result == {"100": "aaa111"}
 
 
 # ---------------------------------------------------------------------------
