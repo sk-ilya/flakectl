@@ -1,6 +1,10 @@
 name: 'Flaky Test Analysis'
 description: 'Analyze CI failures and classify flakes using Claude Agent SDK'
 
+branding:
+  icon: 'activity'
+  color: 'white'
+
 inputs:
   repo:
     description: 'Repository to analyze, e.g. my-org/my-repo'
