@@ -20,12 +20,14 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    ToolUseBlock,
 )
 
 from flakectl.agentlog import log_blocks
 from flakectl.github import clone_at_ref
 from flakectl.progressfile import RUN_BLOCK_RE, parse_categories_section
 from flakectl.prompts.correlator import CORRELATOR_AGENT_PROMPT
+from flakectl.stats import PhaseStats
 from flakectl.tools import create_tools_server
 
 logger = logging.getLogger(__name__)
@@ -119,7 +121,7 @@ async def _run_correlator(
     repo_path: str = "",
     model: str = "sonnet",
     max_turns: int = 80,
-) -> None:
+) -> PhaseStats:
     """Launch a single correlator agent to match categories to fixes."""
     since_date = (
         datetime.now(UTC) - timedelta(days=lookback_days)
@@ -157,16 +159,26 @@ async def _run_correlator(
         mcp_servers={"github": create_tools_server(repo, repo_dir=repo_path)},
     )
 
+    phase = PhaseStats()
     async with ClaudeSDKClient(options=options) as client:
         await client.query(task)
         async for message in client.receive_messages():
             if isinstance(message, ResultMessage):
+                phase.turns = message.num_turns
+                phase.duration_ms = message.duration_ms
+                phase.duration_api_ms = message.duration_api_ms
+                phase.is_error = message.is_error
+                phase.usage = message.usage
                 logger.info(
                     "[correlate] Done in %d turns", message.num_turns,
                 )
                 break
             elif isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, ToolUseBlock):
+                        phase.record_tool(block.name)
                 log_blocks(message, "[correlate] ")
+    return phase
 
 
 def run(
@@ -176,8 +188,8 @@ def run(
     workdir: str | None = None,
     model: str = "sonnet",
     max_turns: int = 80,
-) -> int:
-    """Run the correlator step. Returns 0 on success."""
+) -> tuple[int, PhaseStats]:
+    """Run the correlator step. Returns (exit_code, phase_stats)."""
     cwd = workdir or os.getcwd()
     fixes_path = os.path.join(cwd, "fixes.json")
 
@@ -189,7 +201,7 @@ def run(
         logger.info("No categories found in %s, skipping correlation",
                      progress_path)
         Path(fixes_path).write_text('{"fixes": []}\n')
-        return 0
+        return 0, PhaseStats()
 
     # Extract branches from classified runs
     branches = _extract_branches(content)
@@ -225,7 +237,7 @@ def run(
     # Launch agent
     logger.info("Starting correlator agent (model=%s, max_turns=%d)",
                 model, max_turns)
-    asyncio.run(_run_correlator(
+    phase = asyncio.run(_run_correlator(
         repo, progress_path, lookback_days, branches, cwd,
         commits_path=commits_path, n_commits=n_commits,
         prs_path=prs_path, n_prs=n_prs,
@@ -253,4 +265,4 @@ def run(
             logger.warning("fixes.json is malformed, rewriting empty")
             Path(fixes_path).write_text('{"fixes": []}\n')
 
-    return 0
+    return 0, phase

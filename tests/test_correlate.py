@@ -87,7 +87,7 @@ class TestRunNoCategories:
         progress = tmp_path / "progress.md"
         progress.write_text(content)
 
-        rc = run("org/repo", str(progress), workdir=str(tmp_path))
+        rc, _stats = run("org/repo", str(progress), workdir=str(tmp_path))
         assert rc == 0
 
         fixes_path = tmp_path / "fixes.json"

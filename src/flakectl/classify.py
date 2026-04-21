@@ -26,9 +26,11 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    ToolUseBlock,
 )
 
 from flakectl.agentlog import RESET, agent_color, log_blocks
+from flakectl.constants import AI_GENERATED_TAG
 from flakectl.github import ensure_repo_clones
 from flakectl.progressfile import (
     get_commit_shas,
@@ -43,6 +45,7 @@ from flakectl.progressfile import (
     split_progress,
 )
 from flakectl.prompts.classifier import RECHECK_PROMPT, build_system_prompt
+from flakectl.stats import AgentStats, PhaseStats
 from flakectl.tools import create_tools_server
 
 logger = logging.getLogger(__name__)
@@ -51,15 +54,22 @@ logger = logging.getLogger(__name__)
 async def _run_agent_phase(
     client, prompt, check_fn, run_file: str, run_id: str,
     phase_name: str, color: str, max_turns: int | None = None,
-) -> bool:
-    """Run one agent phase (query + receive loop), return whether check_fn passes.
+) -> tuple[bool, PhaseStats]:
+    """Run one agent phase (query + receive loop).
 
-    Logs success/failure with turn count. When max_turns is provided, the
-    failure message notes whether the turn limit was hit.
+    Returns (check_fn_passed, phase_stats). Logs success/failure with turn
+    count. When max_turns is provided, the failure message notes whether the
+    turn limit was hit.
     """
+    phase = PhaseStats()
     await client.query(prompt)
     async for message in client.receive_messages():
         if isinstance(message, ResultMessage):
+            phase.turns = message.num_turns
+            phase.duration_ms = message.duration_ms
+            phase.duration_api_ms = message.duration_api_ms
+            phase.is_error = message.is_error
+            phase.usage = message.usage
             if check_fn(run_file, run_id):
                 logger.info(
                     "%s[run %s] %s done in %d turns%s",
@@ -77,8 +87,11 @@ async def _run_agent_phase(
                     message.num_turns, RESET)
             break
         elif isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, ToolUseBlock):
+                    phase.record_tool(block.name)
             log_blocks(message, f"{color}[run {run_id}] {phase_name}: ", RESET)
-    return check_fn(run_file, run_id)
+    return check_fn(run_file, run_id), phase
 
 
 async def _run_and_merge(
@@ -88,6 +101,7 @@ async def _run_and_merge(
     classify_counter: list[int],
     total_agents: int,
     recheck_gate: asyncio.Event,
+    agent_stats: list[AgentStats],
     repo_path: str = "",
     context: str = "",
     model: str = "sonnet",
@@ -125,6 +139,7 @@ async def _run_and_merge(
         mcp_servers={"github": create_tools_server(repo, repo_dir=repo_path)},
     )
     c = agent_color(run_id)
+    stats = AgentStats(run_id=run_id)
     classified = False
     counted = False  # whether this agent has incremented classify_counter
 
@@ -144,7 +159,7 @@ async def _run_and_merge(
     try:
         async with ClaudeSDKClient(options=options) as client:
             # Phase 1: Classify
-            ok = await _run_agent_phase(
+            ok, stats.classify = await _run_agent_phase(
                 client, task, is_run_classified, run_file, run_id,
                 "classify", c, max_turns=max_turns)
             if ok:
@@ -168,7 +183,7 @@ async def _run_and_merge(
                 return
 
             # Phase 2: Recheck (same session, full context)
-            ok = await _run_agent_phase(
+            ok, stats.recheck = await _run_agent_phase(
                 client, RECHECK_PROMPT, is_run_done, run_file, run_id,
                 "recheck", c)
             if ok:
@@ -185,6 +200,8 @@ async def _run_and_merge(
         logger.warning("%s[run %s] Agent crashed: %s%s",
                        c, run_id, e, RESET)
         _signal_classify_done()
+    finally:
+        agent_stats.append(stats)
 
 
 async def _classify_all(
@@ -198,16 +215,17 @@ async def _classify_all(
     model: str = "sonnet",
     stale_timeout_min: int = 60,
     max_turns: int = 50,
-) -> tuple[set[str], set[str]]:
+) -> tuple[set[str], set[str], list[AgentStats]]:
     """Launch classifier agents with two-phase synchronization.
 
     Phase 1: all agents classify in parallel, merging as they finish.
     Phase 2: after all classify, agents recheck with full category visibility.
 
-    Returns (done, unfinished).
+    Returns (done, unfinished, agent_stats).
     """
     run_id_set = set(run_ids)
     merged: set[str] = set()
+    agent_stats: list[AgentStats] = []
     merge_lock = asyncio.Lock()
     rp = repo_paths or {}
 
@@ -221,6 +239,7 @@ async def _classify_all(
             _run_and_merge(rid, repo, run_files[rid], cwd,
                            progress_path, merged, merge_lock,
                            classify_counter, len(run_ids), recheck_gate,
+                           agent_stats,
                            repo_path=rp.get(rid, ""),
                            context=context, model=model,
                            max_turns=max_turns))
@@ -295,18 +314,18 @@ async def _classify_all(
     unfinished = run_id_set - merged
     logger.info("Merge summary: %d merged, %d unfinished",
                 len(merged), len(unfinished))
-    return merged, unfinished
+    return merged, unfinished, agent_stats
 
 
 async def run_orchestrator(
     repo: str, progress: str, workdir: str | None = None,
     context: str = "", model: str = "sonnet",
     stale_timeout_min: int = 60, max_turns: int = 50,
-):
+) -> list[AgentStats]:
     pending = get_pending_runs(progress)
     if not pending:
         logger.info("No pending runs found")
-        return
+        return []
 
     logger.info("Found %d pending runs", len(pending))
     cwd = workdir or os.getcwd()
@@ -336,7 +355,7 @@ async def run_orchestrator(
         logger.warning("No runnable runs found after split")
         return
 
-    done, unfinished = await _classify_all(
+    done, unfinished, agent_stats = await _classify_all(
         run_ids, repo, progress, run_files, cwd,
         repo_paths=repo_paths, context=context,
         model=model, stale_timeout_min=stale_timeout_min,
@@ -351,10 +370,15 @@ async def run_orchestrator(
         logger.warning("Marked %d runs as error: %s",
                        len(unfinished), sorted(unfinished))
 
+    return agent_stats
 
 
-async def _run_summarize(report_md: str, progress: str, cwd: str, model: str = "sonnet") -> None:
+
+async def _run_summarize(
+    report_md: str, progress: str, cwd: str, model: str = "sonnet",
+) -> PhaseStats:
     """Launch a postprocess agent to write summary.txt from report.md."""
+    phase = PhaseStats()
     system = "Summarize CI failure classification results in concise plain text."
     task = f"""\
 Read {report_md} and write a plain-text summary (2-3 sentences) to
@@ -377,37 +401,50 @@ If you need more detail about specific runs, you can also read {progress}.
         await client.query(task)
         async for message in client.receive_messages():
             if isinstance(message, ResultMessage):
+                phase.turns = message.num_turns
+                phase.duration_ms = message.duration_ms
+                phase.duration_api_ms = message.duration_api_ms
+                phase.is_error = message.is_error
+                phase.usage = message.usage
                 logger.info("[summarize] Done in %d turns",
                             message.num_turns)
                 break
             elif isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, ToolUseBlock):
+                        phase.record_tool(block.name)
                 log_blocks(message, "[summarize] ")
 
     summary_path = Path(cwd) / "summary.txt"
     if summary_path.exists():
-        logger.info("\n%s", summary_path.read_text().strip())
+        text = summary_path.read_text().strip()
+        if not text.endswith(AI_GENERATED_TAG):
+            summary_path.write_text(text + "\n" + AI_GENERATED_TAG + "\n")
+        logger.info("\n%s", text)
+
+    return phase
 
 
 def run_summarize(
     report_md: str, progress: str = "progress.md",
     workdir: str | None = None, model: str = "sonnet",
-) -> None:
+) -> PhaseStats:
     """Generate summary.txt from report.md."""
     cwd = workdir or os.getcwd()
-    asyncio.run(_run_summarize(report_md, progress, cwd, model=model))
+    return asyncio.run(_run_summarize(report_md, progress, cwd, model=model))
 
 
 def run(
     repo: str, progress: str = "progress.md", workdir: str | None = None,
     context: str = "", model: str = "sonnet",
     stale_timeout_min: int = 60, max_turns: int = 50,
-) -> int:
-    """Run the classification orchestrator. Returns 0 on success, 1 if no runs completed."""
-    asyncio.run(run_orchestrator(
+) -> tuple[int, list[AgentStats]]:
+    """Run the classification orchestrator. Returns (exit_code, agent_stats)."""
+    agent_stats = asyncio.run(run_orchestrator(
         repo, progress, workdir, context=context, model=model,
         stale_timeout_min=stale_timeout_min, max_turns=max_turns,
     ))
     done = get_done_runs(progress)
     if not done:
-        return 1
-    return 0
+        return 1, agent_stats
+    return 0, agent_stats
