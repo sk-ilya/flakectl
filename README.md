@@ -11,6 +11,14 @@
     ...
 ```
 
+## AI Transparency
+
+flakectl uses AI (Claude) to analyze CI logs and generate failure classifications. All category names, descriptions, root-cause summaries, and fix correlations in the report are AI-generated and may contain inaccuracies.
+
+**Always review AI-generated content prior to use.**
+
+For full details on capabilities, limitations, and guidelines, see the **[User Guide](docs/USER_GUIDE.md)**.
+
 Under the hood, flakectl spawns a fleet of Claude agents (via the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents-sdk)) that work in parallel. Each one downloads a failed run's logs, greps through them, classifies every job, and collaborates with the other agents to build a consistent set of root-cause categories. For each root cause, the report links to recent commits and open PRs that attempt to address it, so you can see at a glance what has already been done or is in progress. The result is a structured report you can post to Slack, attach to a ticket, or feed into dashboards.
 
 ## Outputs and report structure

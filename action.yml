@@ -1,5 +1,5 @@
 name: 'Flaky Test Analysis'
-description: 'Analyze CI failures and classify flakes using Claude Agent SDK'
+description: 'Analyze CI failures and classify flakes using AI (Claude Agent SDK). See docs/USER_GUIDE.md for AI transparency details.'
 
 branding:
   icon: 'activity'
