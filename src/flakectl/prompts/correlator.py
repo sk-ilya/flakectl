@@ -193,4 +193,10 @@ Rules:
 - Be conservative: only mark as "match" when you are confident the fix
   addresses the exact root cause. Use "possible" when there is reasonable
   doubt.
+- Temporal filtering for commits: for each category, find the earliest
+  `run_started_at` among runs with that category. Skip any COMMIT whose
+  author date is before that timestamp -- a commit already in the codebase
+  when the flake appeared cannot be its fix.
+- Open PRs are exempt from temporal filtering. They have not been merged,
+  so they could still fix the issue regardless of when they were created.
 """

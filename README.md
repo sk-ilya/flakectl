@@ -107,8 +107,9 @@ permissions:
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `repo` | yes | | Repository to analyze, e.g. `my-org/my-repo` |
-| `branch` | no | `main` | Only analyze runs from this branch. Accepts a single name, a comma-separated list, or `*` for all branches |
+| `branch` | no | `main` | Only analyze runs from this branch. Accepts a single name, a comma-separated list, or `*` for all branches. Defaults to `main` unless `run-ids` is provided |
 | `lookback-days` | no | `7` | How far back to search for failed runs, in days |
+| `run-ids` | no | | Workflow run IDs to analyze (comma-separated). Can be used alone or combined with `branch` to fetch additional runs by ID |
 | `workflow` | yes | | Which workflow file(s) to analyze (filename from `.github/workflows/`, e.g. `ci.yaml`). Accepts a single name, a comma-separated list, or `*` for all |
 | `skip-jobs` | no | | Job names to ignore (comma-separated). Useful for aggregation or reporting jobs that don't contain real test output |
 | `context` | no | | Free-text hints for the classifier, e.g. test framework details, known infra quirks, or job naming conventions |
@@ -249,7 +250,8 @@ By default, outputs are written to the current directory. Use `--output-dir` to 
 |------|---------|-------|
 | `--repo` | (required) | `owner/name` |
 | `--workflow` | `*` | YAML filename(s) from `.github/workflows/` (comma-separated) or `*` for all |
-| `--branch` | `main` | Branch name(s) (comma-separated) or `*` for all |
+| `--branch` | `main` | Branch name(s) (comma-separated) or `*` for all. Defaults to `main` unless `--run-ids` is provided |
+| `--run-ids` | (empty) | Workflow run IDs to analyze (comma-separated). Can be used alone or combined with `--branch` |
 | `--lookback-days` | `7` | Look-back window in days |
 | `--output-dir` | `.` | Where to write `report.md`, `report.json`, and intermediates |
 | `--skip-jobs` | (empty) | Comma-separated job names to ignore |

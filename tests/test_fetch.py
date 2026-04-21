@@ -10,6 +10,7 @@ from flakectl.fetch import (
     filter_runs_by_date,
     get_first_failed_step,
     parse_list_arg,
+    parse_run_ids,
     validate_workflows,
     write_csv,
 )
@@ -150,6 +151,7 @@ class TestBuildCsvRows:
         assert len(rows) == 1
         assert rows[0]["run_id"] == 100
         assert rows[0]["failed_job_name"] == "unit-tests"
+        assert rows[0]["job_conclusion"] == "failure"
         assert rows[0]["failure_step"] == "Run tests"
 
     @patch("flakectl.fetch.list_failed_jobs")
@@ -203,12 +205,14 @@ class TestWriteCsv:
             {
                 "run_id": "1", "run_url": "u1", "branch": "main",
                 "event": "push", "commit_sha": "a", "failed_job_name": "j1",
+                "job_conclusion": "failure",
                 "run_started_at": "2025-01-10T00:00:00Z",
                 "job_completed_at": "", "run_attempt": "1", "failure_step": "",
             },
             {
                 "run_id": "2", "run_url": "u2", "branch": "main",
                 "event": "push", "commit_sha": "b", "failed_job_name": "j2",
+                "job_conclusion": "failure",
                 "run_started_at": "2025-01-15T00:00:00Z",
                 "job_completed_at": "", "run_attempt": "1", "failure_step": "",
             },
@@ -226,6 +230,7 @@ class TestWriteCsv:
         rows = [{
             "run_id": "1", "run_url": "u", "branch": "main",
             "event": "push", "commit_sha": "a", "failed_job_name": "j",
+            "job_conclusion": "failure",
             "run_started_at": "2025-01-15T00:00:00Z",
             "job_completed_at": "", "run_attempt": "1", "failure_step": "s",
         }]
@@ -237,6 +242,36 @@ class TestWriteCsv:
 
         expected = (
             "run_id,run_url,branch,event,commit_sha,failed_job_name,"
-            "run_started_at,job_completed_at,run_attempt,failure_step"
+            "job_conclusion,run_started_at,job_completed_at,run_attempt,"
+            "failure_step"
         )
         assert header == expected
+
+
+# ---------------------------------------------------------------------------
+# parse_run_ids
+# ---------------------------------------------------------------------------
+
+class TestParseRunIds:
+    def test_none_returns_none(self):
+        assert parse_run_ids(None) is None
+
+    def test_empty_returns_none(self):
+        assert parse_run_ids("") is None
+
+    def test_single_id(self):
+        assert parse_run_ids("123") == [123]
+
+    def test_multiple_ids(self):
+        assert parse_run_ids("123, 456, 789") == [123, 456, 789]
+
+    def test_trailing_commas(self):
+        assert parse_run_ids("123,,456,") == [123, 456]
+
+    def test_non_numeric_raises(self):
+        with pytest.raises(ValueError, match="Invalid run ID 'abc'"):
+            parse_run_ids("abc")
+
+    def test_mixed_numeric_and_non_numeric_raises(self):
+        with pytest.raises(ValueError, match="Invalid run ID 'xyz'"):
+            parse_run_ids("123,xyz")

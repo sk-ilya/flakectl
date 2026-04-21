@@ -9,7 +9,7 @@ import csv
 import logging
 from datetime import UTC, datetime, timedelta
 
-from flakectl.github import list_failed_jobs, list_failed_runs_multi
+from flakectl.github import get_runs_by_ids, list_failed_jobs, list_failed_runs_multi
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,7 @@ def build_csv_rows(repo: str, runs: list[dict]) -> list[dict]:
                 "event": run["event"],
                 "commit_sha": run["head_sha"],
                 "failed_job_name": job.get("name", ""),
+                "job_conclusion": job.get("conclusion", ""),
                 "run_started_at": run["created_at"],
                 "job_completed_at": job.get("completed_at", ""),
                 "run_attempt": run.get("run_attempt", ""),
@@ -83,8 +84,9 @@ def write_csv(rows: list[dict], output_path: str) -> None:
 
     fieldnames = [
         "run_id", "run_url", "branch", "event",
-        "commit_sha", "failed_job_name", "run_started_at",
-        "job_completed_at", "run_attempt", "failure_step",
+        "commit_sha", "failed_job_name", "job_conclusion",
+        "run_started_at", "job_completed_at", "run_attempt",
+        "failure_step",
     ]
 
     with open(output_path, "w", newline="") as f:
@@ -101,6 +103,23 @@ def parse_list_arg(value: str) -> list[str] | None:
     if value == "*":
         return None
     return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def parse_run_ids(value: str | None) -> list[int] | None:
+    """Parse comma-separated run IDs. Returns None if empty/None."""
+    if not value:
+        return None
+    ids = []
+    for item in value.split(","):
+        item = item.strip()
+        if item:
+            try:
+                ids.append(int(item))
+            except ValueError:
+                raise ValueError(
+                    f"Invalid run ID '{item}': expected a numeric value"
+                ) from None
+    return ids or None
 
 
 def validate_workflows(workflows: list[str] | None) -> None:
@@ -122,8 +141,9 @@ def run(
     repo: str,
     lookback_days: int = 7,
     workflow: str = "*",
-    branch: str = "main",
+    branch: str | None = None,
     output: str = "failed_jobs.csv",
+    run_ids: list[int] | None = None,
 ) -> int:
     """Fetch failed CI jobs and write to CSV. Returns status code."""
     since_date = (
@@ -131,37 +151,55 @@ def run(
     ).strftime("%Y-%m-%d")
 
     workflows = parse_list_arg(workflow)
-    branches = parse_list_arg(branch)
+    branches = parse_list_arg(branch) if branch else None
     try:
         validate_workflows(workflows)
     except ValueError as e:
         logger.error("%s", e)
         return STATUS_ERROR
 
-    logger.info(
-        "Fetching failed runs from %s since %s (last %d days)...",
-        repo, since_date, lookback_days,
-    )
+    all_runs: list[dict] = []
+    seen_ids: set[int] = set()
 
-    try:
-        runs = list_failed_runs_multi(repo, 200, workflows, branches)
-    except Exception as e:
-        logger.error("Failed to fetch runs: %s", e)
-        return STATUS_ERROR
+    # Fetch by branch/workflow (existing path)
+    if branch:
+        logger.info(
+            "Fetching failed runs from %s since %s (last %d days)...",
+            repo, since_date, lookback_days,
+        )
+        try:
+            branch_runs = list_failed_runs_multi(repo, 200, workflows, branches)
+        except Exception as e:
+            logger.error("Failed to fetch runs: %s", e)
+            return STATUS_ERROR
 
-    if not runs:
-        logger.info("No failed runs found.")
+        filtered = filter_runs_by_date(branch_runs, since_date)
+        for r in filtered:
+            seen_ids.add(r["id"])
+            all_runs.append(r)
+
+    # Fetch by explicit run IDs (no date/status filter)
+    if run_ids:
+        logger.info("Fetching %d run(s) by ID...", len(run_ids))
+        try:
+            id_runs = get_runs_by_ids(repo, run_ids)
+        except Exception as e:
+            logger.error("Failed to fetch runs by ID: %s", e)
+            return STATUS_ERROR
+
+        for r in id_runs:
+            if r["id"] not in seen_ids:
+                seen_ids.add(r["id"])
+                all_runs.append(r)
+
+    if not all_runs:
+        logger.info("No runs found.")
         return STATUS_NO_FAILURES
 
-    filtered = filter_runs_by_date(runs, since_date)
-    logger.info("Processing %d failed runs", len(filtered))
-
-    if not filtered:
-        logger.info("No runs in the specified time range.")
-        return STATUS_NO_FAILURES
+    logger.info("Processing %d run(s)", len(all_runs))
 
     try:
-        rows = build_csv_rows(repo, filtered)
+        rows = build_csv_rows(repo, all_runs)
     except Exception as e:
         logger.error("Failed to fetch failed jobs: %s", e)
         return STATUS_ERROR
