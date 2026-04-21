@@ -38,6 +38,7 @@ def run(
             continue
         runs[rid]["jobs"].append({
             "name": row["failed_job_name"],
+            "conclusion": row.get("job_conclusion", "failure"),
             "step": row["failure_step"],
             "completed_at": row["job_completed_at"],
         })
@@ -71,6 +72,7 @@ def run(
             for job in run_data["jobs"]:
                 total_jobs += 1
                 out.write(f"#### job: `{job['name']}`\n")
+                out.write(f"- **job_conclusion**: {job['conclusion']}\n")
                 out.write(f"- **step**: {job['step']}\n")
                 out.write("- **job_id**:\n")
                 out.write("- **category**:\n")

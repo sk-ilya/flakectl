@@ -56,8 +56,10 @@ def list_failed_runs(
     limit: int,
     workflow: str | None = None,
     branch: str | None = None,
+    event: str | None = None,
+    status: str = "failure",
 ) -> list[dict]:
-    """Get failed workflow runs.
+    """Get workflow runs by status.
 
     Returns dicts with keys: id, url, name, head_branch, event, head_sha,
     created_at, run_attempt.
@@ -66,9 +68,11 @@ def list_failed_runs(
     client = get_client()
     repo = client.get_repo(repo_slug)
 
-    kwargs = {"status": "failure"}
+    kwargs = {"status": status}
     if branch:
         kwargs["branch"] = branch
+    if event:
+        kwargs["event"] = event
 
     if workflow:
         wf = _resolve_workflow(repo, workflow)
@@ -105,13 +109,21 @@ def _check_rate_limit(client: Github) -> None:
         pass
 
 
+_MERGE_QUEUE_PREFIX = "gh-readonly-queue"
+
+
 def list_failed_runs_multi(
     repo_slug: str,
     limit: int,
     workflows: list[str] | None,
     branches: list[str] | None,
 ) -> list[dict]:
-    """Get failed runs across multiple workflows and branches.
+    """Get failed and cancelled runs across multiple workflows and branches.
+
+    When specific branches are requested, also fetches merge_group event
+    runs whose head_branch matches ``gh-readonly-queue/{branch}/...``,
+    since the GitHub API branch filter requires an exact match and would
+    otherwise miss merge-queue runs.
 
     Deduplicates by run ID, sorts by created_at descending.
     """
@@ -121,33 +133,97 @@ def list_failed_runs_multi(
     wf_list = workflows if workflows else [None]
     br_list = branches if branches else [None]
 
-    for wf in wf_list:
-        for br in br_list:
-            try:
-                runs = list_failed_runs(repo_slug, limit, wf, br)
-            except Exception as e:
-                wf_name = wf if wf is not None else "*"
-                br_name = br if br is not None else "*"
-                raise RuntimeError(
-                    "GitHub workflow run lookup failed "
-                    f"(workflow={wf_name}, branch={br_name}): {e}"
-                ) from e
+    def _collect(runs: list[dict]) -> None:
+        for run in runs:
+            if run["id"] not in seen_ids:
+                seen_ids.add(run["id"])
+                all_runs.append(run)
 
-            for run in runs:
-                if run["id"] not in seen_ids:
-                    seen_ids.add(run["id"])
-                    all_runs.append(run)
+    for status in ("failure", "cancelled"):
+        for wf in wf_list:
+            for br in br_list:
+                try:
+                    runs = list_failed_runs(
+                        repo_slug, limit, wf, br, status=status,
+                    )
+                except Exception as e:
+                    wf_name = wf if wf is not None else "*"
+                    br_name = br if br is not None else "*"
+                    raise RuntimeError(
+                        "GitHub workflow run lookup failed "
+                        f"(workflow={wf_name}, branch={br_name}): {e}"
+                    ) from e
+                _collect(runs)
+
+            # When specific branches are requested, also include merge-queue
+            # runs targeting those branches.  Merge-queue runs use branch
+            # names like gh-readonly-queue/main/pr-1234-<sha> so the API
+            # branch=main filter misses them.
+            if branches:
+                try:
+                    mg_runs = list_failed_runs(
+                        repo_slug, limit, wf, branch=None,
+                        event="merge_group", status=status,
+                    )
+                except Exception as e:
+                    wf_name = wf if wf is not None else "*"
+                    logger.warning(
+                        "Failed to fetch merge_group runs for workflow=%s: %s",
+                        wf_name, e,
+                    )
+                    mg_runs = []
+
+                for run in mg_runs:
+                    if run["id"] in seen_ids:
+                        continue
+                    hb = run["head_branch"]
+                    for br in branches:
+                        if hb.startswith(f"{_MERGE_QUEUE_PREFIX}/{br}/"):
+                            seen_ids.add(run["id"])
+                            all_runs.append(run)
+                            break
 
     _check_rate_limit(get_client())
     all_runs.sort(key=lambda r: r["created_at"], reverse=True)
     return all_runs
 
 
+def get_runs_by_ids(repo_slug: str, run_ids: list[int]) -> list[dict]:
+    """Fetch workflow runs by their IDs.
+
+    Returns the same dict format as list_failed_runs.
+    Skips runs whose conclusion is not "failure" or "cancelled".
+    """
+    _validate_repo(repo_slug)
+    client = get_client()
+    repo = client.get_repo(repo_slug)
+
+    results = []
+    for run_id in run_ids:
+        run = repo.get_workflow_run(run_id)
+        if run.conclusion not in ("failure", "cancelled"):
+            logger.info("Skipping run %d (%s)", run_id, run.conclusion or run.status)
+            continue
+        results.append({
+            "id": run.id,
+            "url": run.html_url,
+            "name": run.name,
+            "head_branch": run.head_branch,
+            "event": run.event,
+            "head_sha": run.head_sha,
+            "created_at": run.created_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "run_attempt": run.run_attempt,
+        })
+
+    _check_rate_limit(client)
+    return results
+
+
 def list_failed_jobs(repo_slug: str, run_id: int) -> list[dict]:
-    """Get failed jobs for a specific workflow run.
+    """Get failed and cancelled jobs for a specific workflow run.
 
     Returns dicts with keys: id, name, conclusion, steps, completed_at.
-    Filters to conclusion == "failure".
+    Filters to conclusion in ("failure", "cancelled").
     """
     _validate_repo(repo_slug)
     client = get_client()
@@ -156,7 +232,7 @@ def list_failed_jobs(repo_slug: str, run_id: int) -> list[dict]:
 
     results = []
     for job in run.jobs():
-        if job.conclusion == "failure":
+        if job.conclusion in ("failure", "cancelled"):
             steps = []
             for step in job.steps:
                 steps.append({

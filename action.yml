@@ -15,6 +15,9 @@ inputs:
   lookback-days:
     description: 'How far back to search for failed runs, in days'
     default: '7'
+  run-ids:
+    description: 'Workflow run IDs to analyze (comma-separated). Can be used alone or with branch filter'
+    default: ''
   workflow:
     description: 'Workflow file(s) to analyze (from .github/workflows/). Single name, comma-separated list, or * for all'
     required: true
@@ -76,6 +79,7 @@ runs:
         flakectl run \
           --repo "${{ inputs.repo }}" \
           --branch "${{ inputs.branch }}" \
+          --run-ids "${{ inputs.run-ids }}" \
           --lookback-days "${{ inputs.lookback-days }}" \
           --workflow "${{ inputs.workflow }}" \
           --skip-jobs "${{ inputs.skip-jobs }}" \

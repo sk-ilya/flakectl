@@ -15,6 +15,15 @@ def _parse_csv_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _resolve_branch_and_run_ids(args) -> tuple[str | None, list[int] | None]:
+    from flakectl.fetch import parse_run_ids
+    branch = args.branch
+    run_ids = parse_run_ids(args.run_ids)
+    if not branch and not run_ids:
+        branch = "main"
+    return branch, run_ids
+
+
 def _write_no_failures_outputs(
     output_dir: str,
     repo: str,
@@ -68,7 +77,9 @@ def _write_no_failures_outputs(
 
 def cmd_fetch(args):
     from flakectl.fetch import run
-    return run(args.repo, args.lookback_days, args.workflow, args.branch, args.output)
+    branch, run_ids = _resolve_branch_and_run_ids(args)
+    return run(args.repo, args.lookback_days, args.workflow, branch, args.output,
+               run_ids=run_ids)
 
 
 def cmd_progress(args):
@@ -126,15 +137,18 @@ def cmd_run(args):
     base = args.output_dir
     os.makedirs(base, exist_ok=True)
 
+    branch, run_ids = _resolve_branch_and_run_ids(args)
+
     csv_path = os.path.join(base, "failed_jobs.csv")
     progress_path = os.path.join(base, "progress.md")
 
-    rc = fetch_run(args.repo, args.lookback_days, args.workflow, args.branch, csv_path)
+    rc = fetch_run(args.repo, args.lookback_days, args.workflow, branch, csv_path,
+                   run_ids=run_ids)
     if rc == STATUS_NO_FAILURES:
         _write_no_failures_outputs(
             output_dir=base,
             repo=args.repo,
-            branch=args.branch,
+            branch=branch or "(all)",
             workflow=args.workflow,
             lookback_days=args.lookback_days,
         )
@@ -213,8 +227,12 @@ def main():
         help="Workflow file: name.yaml, comma-separated list, or * for all (default: *)",
     )
     p_fetch.add_argument(
-        "--branch", default="main",
+        "--branch", default=None,
         help="Branch filter: name, comma-separated list, or * for all (default: main)",
+    )
+    p_fetch.add_argument(
+        "--run-ids", default=None,
+        help="Workflow run IDs: comma-separated list (default: none)",
     )
     p_fetch.add_argument(
         "--output", default="failed_jobs.csv",
@@ -338,8 +356,12 @@ def main():
         help="Workflow file: name.yaml, comma-separated list, or * for all (default: *)",
     )
     p_run.add_argument(
-        "--branch", default="main",
+        "--branch", default=None,
         help="Branch filter: name, comma-separated list, or * for all (default: main)",
+    )
+    p_run.add_argument(
+        "--run-ids", default=None,
+        help="Workflow run IDs: comma-separated list (default: none)",
     )
     p_run.add_argument(
         "--skip-jobs", default="",

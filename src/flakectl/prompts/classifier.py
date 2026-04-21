@@ -40,6 +40,16 @@ Once you understand the root cause, classify it:
 - The failure is consistent and reproducible for that code version
 - The triggering commit changed code under test
 
+**Cancelled** jobs need verification. Check the `job_conclusion` field:
+- If a cancelled job has a failed step, it was cancelled due to that error
+  -- analyze the failure as you would a failed job.
+- If a cancelled job has no failed steps, it was likely cancelled externally
+  (manual cancellation, another job in the matrix failed, or a timeout).
+  Check the logs to determine the cause. If the cancellation is due to
+  another job failing in the same run, mark as infra-flake/cascade-cancel
+  or skip the job if it provides no new information beyond the primary
+  failure.
+
 ## Failure types and category format
 
 ```
@@ -304,16 +314,22 @@ Steps 7-8 are about categorizing collaboratively.
 
 3. **Fetch failed jobs** using `gh run view {run_id} --json jobs`. Extract
    job IDs and names from the JSON output. Filter to jobs with conclusion
-   "failure".
+   "failure" or "cancelled".
 
 4. **Download and search logs.** For each failed job, download its log
    using `download_log` with `job_id` and `output` (set to
    `{RUN_ID}_{JOB_ID}.log`). The log is saved to `files/...`. Search it
    using Grep (see "Searching log files" above).
 
-5. **Check intermittence.** Use `gh run list --commit {sha} --json
-   conclusion,name` to see if the same job passes on other runs at the
-   same commit. Intermittent = flake. Consistently failing = likely real.
+5. **Check intermittence** at two levels:
+   a. **Same commit**: `gh run list --commit {sha} --json conclusion,name`
+      -- does the same job pass on other runs at this exact commit?
+      Intermittent at same code = flake.
+   b. **Branch history**: `gh run list --branch {branch} --json
+      conclusion,name,headSha --limit 20` -- does the same job ever
+      succeed on this branch across recent commits? If the job fails on
+      every recent commit on the branch, it is very likely a real bug
+      (or a persistent environment issue), not a flake.
 
 6. **Investigate the source repo** to understand the root cause deeply.
    Unless the root cause is already completely obvious from the logs,
@@ -345,7 +361,10 @@ Steps 7-8 are about categorizing collaboratively.
      files for deeper verification (log path: `files/{run_id}_{job_id}.log`).
    - Once you know the root cause, the flake-or-real determination
      follows: unrelated commit + intermittent = flake; commit changed
-     code under test + consistent failure = real bug.
+     code under test + consistent failure = real bug. Also: if the job
+     fails on every recent commit on the branch (never succeeding),
+     treat it as a real bug or persistent environment issue even if
+     the triggering commit appears unrelated.
 
 8. **Update your progress file** (given in the task description) via Edit:
    - Fill all job fields (category, is_flake, test-id, failed_test,
